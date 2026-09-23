@@ -25,3 +25,7 @@ coverage/
 
 # prisma
 prisma/migrations/dev.db
+
+# uploaded files (local disk storage — not part of source control)
+uploads/*
+!uploads/.gitkeep
