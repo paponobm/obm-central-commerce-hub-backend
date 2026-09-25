@@ -39,6 +39,7 @@ export class OrdersController {
     @Query('customerId') customerId?: string,
     @Query('from') from?: string,
     @Query('to') to?: string,
+    @Query('search') search?: string,
   ) {
     return this.ordersService.findAll({
       channelId,
@@ -49,6 +50,7 @@ export class OrdersController {
       customerId,
       from,
       to,
+      search,
     });
   }
 

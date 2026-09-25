@@ -50,6 +50,7 @@ export class OrdersService {
     customerId?: string;
     from?: string;
     to?: string;
+    search?: string;
   }) {
     return this.prisma.order.findMany({
       where: {
@@ -69,6 +70,40 @@ export class OrdersService {
                 ...(filters.from ? { gte: new Date(filters.from) } : {}),
                 ...(filters.to ? { lte: new Date(filters.to) } : {}),
               },
+            }
+          : {}),
+        ...(filters.search
+          ? {
+              OR: [
+                {
+                  orderNumber: {
+                    contains: filters.search,
+                    mode: 'insensitive',
+                  },
+                },
+                {
+                  shippingName: {
+                    contains: filters.search,
+                    mode: 'insensitive',
+                  },
+                },
+                {
+                  shippingPhone: {
+                    contains: filters.search,
+                    mode: 'insensitive',
+                  },
+                },
+                {
+                  customer: {
+                    name: { contains: filters.search, mode: 'insensitive' },
+                  },
+                },
+                {
+                  customer: {
+                    phone: { contains: filters.search, mode: 'insensitive' },
+                  },
+                },
+              ],
             }
           : {}),
       },

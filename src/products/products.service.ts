@@ -55,6 +55,9 @@ export class ProductsService {
         category: true,
         brand: true,
         inventory: true,
+        // Just the cover image — list views only ever show one thumbnail
+        // per product, so there's no reason to ship the full gallery here.
+        images: { take: 1, orderBy: { sortOrder: 'asc' } },
       },
       orderBy: { createdAt: 'desc' },
     });
