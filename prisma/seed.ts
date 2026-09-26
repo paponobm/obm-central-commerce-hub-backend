@@ -8,6 +8,10 @@ const prisma = new PrismaClient();
 const PERMISSIONS: { key: string; label: string }[] = [
   { key: 'channels.view', label: 'View storefronts' },
   { key: 'channels.manage', label: 'Create/edit storefronts' },
+  {
+    key: 'channels.all_access',
+    label: 'Unrestricted access to every store (ignores per-user channel assignment)',
+  },
   { key: 'products.view', label: 'View products' },
   { key: 'products.manage', label: 'Create/edit products' },
   { key: 'products.publish', label: 'Publish/unpublish products to channels' },
@@ -58,6 +62,20 @@ const ROLE_PERMISSIONS: Record<string, string[] | '*'> = {
     'customers.manage',
     'payments.view',
     'shipments.view',
+  ],
+  // Read-only across the board — every `.view` permission, none of the
+  // `.manage`/`.create`/`.update_status`/`.adjust`/`.publish` ones.
+  // Deliberately does NOT include channels.all_access, so a Viewer is still
+  // scoped to whichever stores they're assigned via UserChannel.
+  Viewer: [
+    'channels.view',
+    'products.view',
+    'inventory.view',
+    'orders.view',
+    'customers.view',
+    'payments.view',
+    'shipments.view',
+    'reports.view',
   ],
 };
 

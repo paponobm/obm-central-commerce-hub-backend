@@ -18,6 +18,9 @@ import { OrdersModule } from './orders/orders.module';
 import { ReportsModule } from './reports/reports.module';
 import { StorefrontModule } from './storefront/storefront.module';
 import { UploadsModule } from './uploads/uploads.module';
+import { SuppliersModule } from './suppliers/suppliers.module';
+import { PurchasesModule } from './purchases/purchases.module';
+import { SettingsModule } from './settings/settings.module';
 
 @Module({
   imports: [
@@ -41,6 +44,9 @@ import { UploadsModule } from './uploads/uploads.module';
     ReportsModule,
     StorefrontModule,
     UploadsModule,
+    SuppliersModule,
+    PurchasesModule,
+    SettingsModule,
   ],
   controllers: [AppController],
   providers: [AppService, { provide: APP_GUARD, useClass: ThrottlerGuard }],

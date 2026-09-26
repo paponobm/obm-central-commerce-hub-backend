@@ -79,6 +79,19 @@ export class InventoryService {
     };
   }
 
+  // Ledger across every product, newest first — the "Stock Movements" page.
+  async getAllMovements(take = 100) {
+    const rows = await this.prisma.stockMovement.findMany({
+      orderBy: { createdAt: 'desc' },
+      take,
+      include: {
+        createdBy: { select: { id: true, name: true } },
+        product: { select: { id: true, sku: true, name: true } },
+      },
+    });
+    return rows;
+  }
+
   async getMovements(productId: string, take = 50) {
     await this.assertInventoryExists(productId);
     return this.prisma.stockMovement.findMany({

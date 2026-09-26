@@ -1,11 +1,18 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { toNumber } from '../common/decimal.util';
+import {
+  ALL_ACCESS_PERMISSION,
+  ChannelScopeService,
+} from '../common/channel-scope/channel-scope.service';
+import { JwtPayload } from '../auth/types/jwt-payload.type';
 import { CreateCustomerDto } from './dto/create-customer.dto';
 import { UpdateCustomerDto } from './dto/update-customer.dto';
 
@@ -20,7 +27,26 @@ export interface ResolveCustomerInput {
 
 @Injectable()
 export class CustomersService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly channelScope: ChannelScopeService,
+  ) {}
+
+  // Customer has no channelId column — a customer belongs to a store only
+  // through having ordered there (ARCHITECTURE.md §19), so a restricted
+  // user's visibility is "has at least one order in my channel(s)". Never
+  // add a direct column to Customer to short-circuit this.
+  private async visibleWhere(
+    user: JwtPayload,
+    requestedChannelId?: string,
+  ): Promise<Prisma.CustomerWhereInput> {
+    const resolved = await this.channelScope.resolveDirectFilter(
+      user,
+      requestedChannelId,
+    );
+    if (!resolved.channelId) return {};
+    return { orders: { some: { channelId: resolved.channelId } } };
+  }
 
   async create(dto: CreateCustomerDto) {
     return this.handleUniqueConstraints(() =>
@@ -28,10 +54,12 @@ export class CustomersService {
     );
   }
 
-  async findAll(search?: string) {
+  async findAll(user: JwtPayload, search?: string, channelId?: string) {
+    const visible = await this.visibleWhere(user, channelId);
     return this.prisma.customer.findMany({
       where: {
         deletedAt: null,
+        ...visible,
         ...(search
           ? {
               OR: [
@@ -45,7 +73,7 @@ export class CustomersService {
     });
   }
 
-  async findOne(id: string) {
+  private async requireCustomer(id: string) {
     const customer = await this.prisma.customer.findFirst({
       where: { id, deletedAt: null },
     });
@@ -55,15 +83,104 @@ export class CustomersService {
     return customer;
   }
 
-  async update(id: string, dto: UpdateCustomerDto) {
-    await this.findOne(id);
+  private async assertVisible(user: JwtPayload, customerId: string) {
+    if (user.permissions.includes(ALL_ACCESS_PERMISSION)) return;
+    const visible = await this.visibleWhere(user);
+    const count = await this.prisma.customer.count({
+      where: { id: customerId, ...visible },
+    });
+    if (count === 0) {
+      throw new ForbiddenException(
+        'This customer has no orders on any of your assigned stores',
+      );
+    }
+  }
+
+  // Detail page: the customer plus order history, totals, and a per-store
+  // breakdown — all computed over only the orders the caller may see, so a
+  // restricted user never learns what a shared customer spent elsewhere.
+  async findOne(id: string, user: JwtPayload) {
+    const customer = await this.requireCustomer(id);
+    await this.assertVisible(user, id);
+
+    const scope = await this.channelScope.resolveDirectFilter(user);
+    const orders = await this.prisma.order.findMany({
+      where: { customerId: id, ...scope },
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true,
+        orderNumber: true,
+        status: true,
+        paymentStatus: true,
+        total: true,
+        createdAt: true,
+        channelId: true,
+        channel: { select: { id: true, name: true } },
+      },
+    });
+
+    const counted = orders.filter((o) => o.status !== 'CANCELLED');
+    const byChannel = new Map<
+      string,
+      {
+        channelId: string | null;
+        channelName: string;
+        orderCount: number;
+        totalSpent: number;
+      }
+    >();
+    for (const o of orders) {
+      const key = o.channelId ?? 'none';
+      const row = byChannel.get(key) ?? {
+        channelId: o.channelId,
+        channelName: o.channel?.name ?? 'No channel (manual)',
+        orderCount: 0,
+        totalSpent: 0,
+      };
+      row.orderCount += 1;
+      if (o.status !== 'CANCELLED') row.totalSpent += toNumber(o.total);
+      byChannel.set(key, row);
+    }
+
+    return {
+      ...customer,
+      stats: {
+        totalOrders: orders.length,
+        totalSpent: counted.reduce((sum, o) => sum + toNumber(o.total), 0),
+        lastOrderAt: orders[0]?.createdAt ?? null,
+      },
+      ordersByChannel: [...byChannel.values()].sort(
+        (a, b) => b.orderCount - a.orderCount,
+      ),
+      orders: orders.map((o) => ({
+        id: o.id,
+        orderNumber: o.orderNumber,
+        status: o.status,
+        paymentStatus: o.paymentStatus,
+        total: toNumber(o.total),
+        createdAt: o.createdAt,
+        channelName: o.channel?.name ?? 'No channel (manual)',
+      })),
+    };
+  }
+
+  async update(id: string, dto: UpdateCustomerDto, user: JwtPayload) {
+    await this.requireCustomer(id);
+    await this.assertVisible(user, id);
     return this.handleUniqueConstraints(() =>
       this.prisma.customer.update({ where: { id }, data: dto }),
     );
   }
 
-  async remove(id: string) {
-    await this.findOne(id);
+  // A customer is shared across every store, so deleting one is a
+  // cross-store action — only unrestricted users may do it.
+  async remove(id: string, user: JwtPayload) {
+    if (!user.permissions.includes(ALL_ACCESS_PERMISSION)) {
+      throw new ForbiddenException(
+        'Only unrestricted users can delete a customer shared across stores',
+      );
+    }
+    await this.requireCustomer(id);
     return this.prisma.customer.update({
       where: { id },
       data: { deletedAt: new Date() },

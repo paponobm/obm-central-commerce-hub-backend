@@ -31,6 +31,18 @@ enum OrderStatus {
   RETURNED
 }
 
+// Tracks whether a customer has actually been reached and how they
+// responded — independent of Order.status (a PENDING order can be
+// CONFIRMED here after a phone call, before its status ever changes).
+// See ARCHITECTURE.md §17.
+enum CustomerResponseStatus {
+  NO_RESPONSE
+  CALL_BACK
+  INTERESTED
+  NOT_INTERESTED
+  CONFIRMED
+}
+
 enum PaymentMethod {
   COD
   BKASH
@@ -105,6 +117,7 @@ model User {
   stockMovements     StockMovement[]
   auditLogs          AuditLog[]
   purchases          Purchase[]
+  channels           UserChannel[]
 
   @@index([roleId])
   @@map("users")
@@ -160,8 +173,25 @@ model Channel {
 
   productChannels ProductChannel[]
   orders          Order[]
+  users           UserChannel[]
 
   @@map("channels")
+}
+
+// Which channels a user's access applies to — orthogonal to Role (which
+// governs *what* they can do). A user holding the `channels.all_access`
+// permission ignores this table entirely (unrestricted); everyone else is
+// restricted to exactly these channels, and zero rows means zero access
+// (fails closed, not open). See ARCHITECTURE.md §14.
+model UserChannel {
+  userId    String
+  channelId String
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  @@id([userId, channelId])
+  @@map("user_channels")
 }
 
 // =====================================================================
@@ -345,9 +375,10 @@ model Order {
   channelId      String? // null allowed for e.g. a pure phone/manual order with no storefront
   source         OrderSource
   customerId     String
-  status         OrderStatus    @default(PENDING)
-  paymentStatus  PaymentStatus  @default(UNPAID)
-  shipmentStatus ShipmentStatus @default(NOT_SHIPPED)
+  status           OrderStatus            @default(PENDING)
+  paymentStatus    PaymentStatus          @default(UNPAID)
+  shipmentStatus   ShipmentStatus         @default(NOT_SHIPPED)
+  customerResponse CustomerResponseStatus @default(NO_RESPONSE)
 
   subtotal    Decimal @db.Decimal(12, 2)
   discount    Decimal @default(0) @db.Decimal(12, 2)
@@ -506,6 +537,21 @@ model PurchaseItem {
 
   @@index([purchaseId])
   @@map("purchase_items")
+}
+
+// =====================================================================
+// SETTINGS
+// =====================================================================
+
+// Single-row-per-key store for small global config (business profile,
+// default low-stock threshold). `value` is JSON so adding a setting never
+// needs a migration.
+model Setting {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @updatedAt
+
+  @@map("settings")
 }
 
 // =====================================================================

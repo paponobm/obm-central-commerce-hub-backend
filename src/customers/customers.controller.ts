@@ -12,6 +12,8 @@ import {
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { PermissionsGuard } from '../auth/guards/permissions.guard';
 import { RequirePermissions } from '../auth/decorators/require-permissions.decorator';
+import { CurrentUser } from '../auth/decorators/current-user.decorator';
+import { JwtPayload } from '../auth/types/jwt-payload.type';
 import { CustomersService } from './customers.service';
 import { CreateCustomerDto } from './dto/create-customer.dto';
 import { UpdateCustomerDto } from './dto/update-customer.dto';
@@ -23,14 +25,18 @@ export class CustomersController {
 
   @Get()
   @RequirePermissions('customers.view')
-  findAll(@Query('search') search?: string) {
-    return this.customersService.findAll(search);
+  findAll(
+    @CurrentUser() user: JwtPayload,
+    @Query('search') search?: string,
+    @Query('channelId') channelId?: string,
+  ) {
+    return this.customersService.findAll(user, search, channelId);
   }
 
   @Get(':id')
   @RequirePermissions('customers.view')
-  findOne(@Param('id') id: string) {
-    return this.customersService.findOne(id);
+  findOne(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
+    return this.customersService.findOne(id, user);
   }
 
   @Post()
@@ -41,13 +47,17 @@ export class CustomersController {
 
   @Patch(':id')
   @RequirePermissions('customers.manage')
-  update(@Param('id') id: string, @Body() dto: UpdateCustomerDto) {
-    return this.customersService.update(id, dto);
+  update(
+    @Param('id') id: string,
+    @Body() dto: UpdateCustomerDto,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.customersService.update(id, dto, user);
   }
 
   @Delete(':id')
   @RequirePermissions('customers.manage')
-  remove(@Param('id') id: string) {
-    return this.customersService.remove(id);
+  remove(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
+    return this.customersService.remove(id, user);
   }
 }

@@ -8,6 +8,8 @@ import {
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { PermissionsGuard } from '../auth/guards/permissions.guard';
 import { RequirePermissions } from '../auth/decorators/require-permissions.decorator';
+import { CurrentUser } from '../auth/decorators/current-user.decorator';
+import { JwtPayload } from '../auth/types/jwt-payload.type';
 import {
   ReportsService,
   SalesPeriodUnit,
@@ -24,31 +26,49 @@ export class ReportsController {
   constructor(private readonly reportsService: ReportsService) {}
 
   @Get('dashboard')
-  getDashboard() {
-    return this.reportsService.getDashboard();
+  getDashboard(
+    @CurrentUser() user: JwtPayload,
+    @Query('channelId') channelId?: string,
+  ) {
+    return this.reportsService.getDashboard(user, channelId);
   }
 
   @Get('sales-by-channel')
-  getSalesByChannel(@Query('from') from?: string, @Query('to') to?: string) {
-    return this.reportsService.getSalesByChannel(from, to);
+  getSalesByChannel(
+    @CurrentUser() user: JwtPayload,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('channelId') channelId?: string,
+  ) {
+    return this.reportsService.getSalesByChannel(user, from, to, channelId);
   }
 
   @Get('sales-by-period')
   getSalesByPeriod(
+    @CurrentUser() user: JwtPayload,
     @Query('from') from?: string,
     @Query('to') to?: string,
     @Query('groupBy') groupBy?: string,
+    @Query('channelId') channelId?: string,
   ) {
     const unit = this.validateOneOf(groupBy, PERIOD_UNITS, 'day', 'groupBy');
-    return this.reportsService.getSalesByPeriod(from, to, unit);
+    return this.reportsService.getSalesByPeriod(
+      user,
+      from,
+      to,
+      unit,
+      channelId,
+    );
   }
 
   @Get('top-products')
   getTopProducts(
+    @CurrentUser() user: JwtPayload,
     @Query('from') from?: string,
     @Query('to') to?: string,
     @Query('limit') limit?: string,
     @Query('sortBy') sortBy?: string,
+    @Query('channelId') channelId?: string,
   ) {
     const sort = this.validateOneOf(sortBy, SORT_OPTIONS, 'revenue', 'sortBy');
     const parsedLimit = limit ? parseInt(limit, 10) : 10;
@@ -57,12 +77,22 @@ export class ReportsController {
         'limit must be an integer between 1 and 100',
       );
     }
-    return this.reportsService.getTopProducts(from, to, parsedLimit, sort);
+    return this.reportsService.getTopProducts(
+      user,
+      from,
+      to,
+      parsedLimit,
+      sort,
+      channelId,
+    );
   }
 
   @Get('stock-valuation')
-  getStockValuation() {
-    return this.reportsService.getStockValuation();
+  getStockValuation(
+    @CurrentUser() user: JwtPayload,
+    @Query('channelId') channelId?: string,
+  ) {
+    return this.reportsService.getStockValuation(user, channelId);
   }
 
   private validateOneOf<T extends string>(

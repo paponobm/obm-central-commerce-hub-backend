@@ -7,6 +7,7 @@ import {
   Query,
   UseGuards,
 } from '@nestjs/common';
+import { CentralOnlyGuard } from '../common/channel-scope/central-only.guard';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { PermissionsGuard } from '../auth/guards/permissions.guard';
 import { RequirePermissions } from '../auth/decorators/require-permissions.decorator';
@@ -16,7 +17,7 @@ import { InventoryService } from './inventory.service';
 import { AdjustInventoryDto } from './dto/adjust-inventory.dto';
 
 @Controller('admin/inventory')
-@UseGuards(JwtAuthGuard, PermissionsGuard)
+@UseGuards(JwtAuthGuard, PermissionsGuard, CentralOnlyGuard)
 export class InventoryController {
   constructor(private readonly inventoryService: InventoryService) {}
 
@@ -30,6 +31,16 @@ export class InventoryController {
       lowStockOnly: lowStock === 'true',
       search,
     });
+  }
+
+  // Must be declared before ':productId' or "movements" is captured as an id.
+  @Get('movements')
+  @RequirePermissions('inventory.view')
+  getAllMovements(@Query('limit') limit?: string) {
+    const parsed = limit ? parseInt(limit, 10) : 100;
+    return this.inventoryService.getAllMovements(
+      Number.isNaN(parsed) ? 100 : Math.min(Math.max(parsed, 1), 500),
+    );
   }
 
   @Get(':productId')

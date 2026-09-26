@@ -22,6 +22,7 @@ import { JwtPayload } from '../auth/types/jwt-payload.type';
 import { OrdersService } from './orders.service';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
+import { UpdateCustomerResponseDto } from './dto/update-customer-response.dto';
 
 @Controller('admin/orders')
 @UseGuards(JwtAuthGuard, PermissionsGuard)
@@ -31,33 +32,39 @@ export class OrdersController {
   @Get()
   @RequirePermissions('orders.view')
   findAll(
+    @CurrentUser() user: JwtPayload,
     @Query('channelId') channelId?: string,
     @Query('status') status?: OrderStatus,
     @Query('source') source?: OrderSource,
     @Query('paymentStatus') paymentStatus?: PaymentStatus,
     @Query('shipmentStatus') shipmentStatus?: ShipmentStatus,
     @Query('customerId') customerId?: string,
+    @Query('productId') productId?: string,
     @Query('from') from?: string,
     @Query('to') to?: string,
     @Query('search') search?: string,
   ) {
-    return this.ordersService.findAll({
-      channelId,
-      status,
-      source,
-      paymentStatus,
-      shipmentStatus,
-      customerId,
-      from,
-      to,
-      search,
-    });
+    return this.ordersService.findAll(
+      {
+        channelId,
+        status,
+        source,
+        paymentStatus,
+        shipmentStatus,
+        customerId,
+        productId,
+        from,
+        to,
+        search,
+      },
+      user,
+    );
   }
 
   @Get(':id')
   @RequirePermissions('orders.view')
-  findOne(@Param('id') id: string) {
-    return this.ordersService.findOne(id);
+  findOne(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
+    return this.ordersService.findOne(id, user);
   }
 
   // The one order-creation endpoint for every source — website checkout
@@ -67,7 +74,7 @@ export class OrdersController {
   @Post()
   @RequirePermissions('orders.create')
   create(@Body() dto: CreateOrderDto, @CurrentUser() user: JwtPayload) {
-    return this.ordersService.createOrder(dto, user.sub);
+    return this.ordersService.createOrder(dto, user.sub, user);
   }
 
   @Patch(':id/status')
@@ -77,6 +84,19 @@ export class OrdersController {
     @Body() dto: UpdateOrderStatusDto,
     @CurrentUser() user: JwtPayload,
   ) {
-    return this.ordersService.updateStatus(id, dto, user.sub);
+    return this.ordersService.updateStatus(id, dto, user.sub, user);
+  }
+
+  // Independent of order status — tracks whether the customer has actually
+  // been reached and how they responded, not where the order is in
+  // fulfillment. No state machine: any value can follow any value.
+  @Patch(':id/customer-response')
+  @RequirePermissions('orders.update_status')
+  updateCustomerResponse(
+    @Param('id') id: string,
+    @Body() dto: UpdateCustomerResponseDto,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.ordersService.updateCustomerResponse(id, dto, user.sub, user);
   }
 }

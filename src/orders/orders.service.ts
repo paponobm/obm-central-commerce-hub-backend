@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -14,9 +15,15 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { runTransaction } from '../common/prisma-transaction.util';
 import { toNumber } from '../common/decimal.util';
+import {
+  ALL_ACCESS_PERMISSION,
+  ChannelScopeService,
+} from '../common/channel-scope/channel-scope.service';
+import { JwtPayload } from '../auth/types/jwt-payload.type';
 import { CustomersService } from '../customers/customers.service';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
+import { UpdateCustomerResponseDto } from './dto/update-customer-response.dto';
 
 // The order lifecycle (ARCHITECTURE.md §7.2). Empty array = terminal state.
 const TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
@@ -39,22 +46,31 @@ export class OrdersService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly customersService: CustomersService,
+    private readonly channelScope: ChannelScopeService,
   ) {}
 
-  async findAll(filters: {
-    channelId?: string;
-    status?: OrderStatus;
-    source?: OrderSource;
-    paymentStatus?: PaymentStatus;
-    shipmentStatus?: ShipmentStatus;
-    customerId?: string;
-    from?: string;
-    to?: string;
-    search?: string;
-  }) {
+  async findAll(
+    filters: {
+      channelId?: string;
+      status?: OrderStatus;
+      source?: OrderSource;
+      paymentStatus?: PaymentStatus;
+      shipmentStatus?: ShipmentStatus;
+      customerId?: string;
+      productId?: string;
+      from?: string;
+      to?: string;
+      search?: string;
+    },
+    user: JwtPayload,
+  ) {
+    const channelFilter = await this.channelScope.resolveDirectFilter(
+      user,
+      filters.channelId,
+    );
     return this.prisma.order.findMany({
       where: {
-        ...(filters.channelId ? { channelId: filters.channelId } : {}),
+        ...channelFilter,
         ...(filters.status ? { status: filters.status } : {}),
         ...(filters.source ? { source: filters.source } : {}),
         ...(filters.paymentStatus
@@ -64,6 +80,9 @@ export class OrdersService {
           ? { shipmentStatus: filters.shipmentStatus }
           : {}),
         ...(filters.customerId ? { customerId: filters.customerId } : {}),
+        ...(filters.productId
+          ? { items: { some: { productId: filters.productId } } }
+          : {}),
         ...(filters.from || filters.to
           ? {
               createdAt: {
@@ -116,14 +135,17 @@ export class OrdersService {
     });
   }
 
-  async findOne(id: string) {
+  async findOne(id: string, user: JwtPayload) {
     const order = await this.prisma.order.findUnique({
       where: { id },
       include: {
         customer: true,
         channel: true,
         items: true,
-        statusHistory: { orderBy: { createdAt: 'asc' } },
+        statusHistory: {
+          orderBy: { createdAt: 'asc' },
+          include: { changedBy: { select: { id: true, name: true } } },
+        },
         payments: true,
         shipment: true,
       },
@@ -131,7 +153,92 @@ export class OrdersService {
     if (!order) {
       throw new NotFoundException(`Order ${id} not found`);
     }
-    return order;
+    // Direct-ID access must be scope-checked too, not just the list
+    // endpoint — otherwise a restricted user could reach another store's
+    // order simply by guessing/enumerating its id.
+    await this.assertChannelAccess(user, order.channelId);
+
+    const timeline = await this.buildTimeline(order.id, order.statusHistory);
+    return { ...order, timeline };
+  }
+
+  // Merges OrderStatusHistory (dedicated table) with CustomerResponse
+  // changes (logged to the generic AuditLog, not a second history table —
+  // ARCHITECTURE.md §17) into one chronological feed for the Order Detail
+  // page. Each entry carries its own `type` so the frontend can render the
+  // two kinds of change differently without losing the shared timeline.
+  private async buildTimeline(
+    orderId: string,
+    statusHistory: {
+      id: string;
+      fromStatus: OrderStatus | null;
+      toStatus: OrderStatus;
+      note: string | null;
+      createdAt: Date;
+      changedBy: { id: string; name: string } | null;
+    }[],
+  ) {
+    const responseLogs = await this.prisma.auditLog.findMany({
+      where: {
+        entityType: 'Order',
+        entityId: orderId,
+        action: 'order.customer_response_change',
+      },
+      orderBy: { createdAt: 'asc' },
+      include: { user: { select: { id: true, name: true } } },
+    });
+
+    const statusEntries = statusHistory.map((h) => ({
+      type: 'status' as const,
+      id: h.id,
+      fromStatus: h.fromStatus,
+      toStatus: h.toStatus,
+      note: h.note,
+      changedBy: h.changedBy,
+      createdAt: h.createdAt,
+    }));
+
+    const responseEntries = responseLogs.map((l) => {
+      const before = l.before as { customerResponse?: string } | null;
+      const after = l.after as {
+        customerResponse?: string;
+        note?: string;
+      } | null;
+      return {
+        type: 'customer_response' as const,
+        id: l.id,
+        fromResponse: before?.customerResponse ?? null,
+        toResponse: after?.customerResponse ?? null,
+        note: after?.note ?? null,
+        changedBy: l.user,
+        createdAt: l.createdAt,
+      };
+    });
+
+    return [...statusEntries, ...responseEntries].sort(
+      (a, b) => a.createdAt.getTime() - b.createdAt.getTime(),
+    );
+  }
+
+  // A channel-restricted user can only touch orders whose channel is in
+  // their assigned set; a null-channel (manual, no-store) order is only
+  // reachable by an unrestricted (`channels.all_access`) user, per
+  // ARCHITECTURE.md §26 — it doesn't belong to any store a restricted
+  // user could be assigned to.
+  private async assertChannelAccess(
+    user: JwtPayload,
+    channelId: string | null,
+  ) {
+    if (user.permissions.includes(ALL_ACCESS_PERMISSION)) return;
+    if (!channelId) {
+      throw new ForbiddenException(
+        'This order has no store — restricted to unrestricted users',
+      );
+    }
+    const allowed = await this.channelScope.getAssignedChannelIds(user.sub);
+    if (!allowed.includes(channelId)) {
+      throw new ForbiddenException('You are not assigned to this store');
+    }
   }
 
   // The single entry point for every order regardless of where it comes
@@ -140,7 +247,22 @@ export class OrdersService {
   // only in `source`/`channelId`/`createdById`. That guarantees a manual
   // order can never accidentally bypass the stock-reservation logic that
   // protects the website.
-  async createOrder(dto: CreateOrderDto, actorUserId?: string) {
+  // `user` is only present for admin-created orders (manual/phone/etc.) —
+  // the storefront's own guest checkout calls this with no admin user at
+  // all (it's unauthenticated), so the channel-access check below only
+  // runs when there's actually an admin identity to check it against. A
+  // restricted admin user needs `dto.channelId` set to one of their
+  // assigned stores; they can't create a no-store order either, since
+  // they'd then be unable to see it again (findOne enforces the same rule).
+  async createOrder(
+    dto: CreateOrderDto,
+    actorUserId?: string,
+    user?: JwtPayload,
+  ) {
+    if (user) {
+      await this.assertChannelAccess(user, dto.channelId ?? null);
+    }
+
     let channel = null;
     if (dto.channelId) {
       channel = await this.prisma.channel.findFirst({
@@ -338,7 +460,8 @@ export class OrdersService {
   async updateStatus(
     id: string,
     dto: UpdateOrderStatusDto,
-    actorUserId?: string,
+    actorUserId: string | undefined,
+    user: JwtPayload,
   ) {
     const order = await this.prisma.order.findUnique({
       where: { id },
@@ -347,6 +470,7 @@ export class OrdersService {
     if (!order) {
       throw new NotFoundException(`Order ${id} not found`);
     }
+    await this.assertChannelAccess(user, order.channelId);
 
     const allowed = TRANSITIONS[order.status];
     if (!allowed.includes(dto.status)) {
@@ -410,6 +534,45 @@ export class OrdersService {
       },
       { timeout: 10000, maxWait: 5000 },
     );
+  }
+
+  // Independent of Order.status — a plain field update with no state
+  // machine (any value can follow any value, ARCHITECTURE.md §17). Never
+  // touches status, stock, or the shipment/payment state; logged to the
+  // generic AuditLog rather than a dedicated history table so the Order
+  // Detail timeline can merge it with OrderStatusHistory by timestamp.
+  async updateCustomerResponse(
+    id: string,
+    dto: UpdateCustomerResponseDto,
+    actorUserId: string | undefined,
+    user: JwtPayload,
+  ) {
+    const order = await this.prisma.order.findUnique({ where: { id } });
+    if (!order) {
+      throw new NotFoundException(`Order ${id} not found`);
+    }
+    await this.assertChannelAccess(user, order.channelId);
+
+    const [updated] = await this.prisma.$transaction([
+      this.prisma.order.update({
+        where: { id },
+        data: { customerResponse: dto.customerResponse },
+      }),
+      this.prisma.auditLog.create({
+        data: {
+          userId: actorUserId,
+          action: 'order.customer_response_change',
+          entityType: 'Order',
+          entityId: id,
+          before: { customerResponse: order.customerResponse },
+          after: {
+            customerResponse: dto.customerResponse,
+            note: dto.note ?? null,
+          },
+        },
+      }),
+    ]);
+    return updated;
   }
 
   private async releaseReservation(

@@ -1,8 +1,10 @@
 import { Injectable } from '@nestjs/common';
-import { OrderStatus } from '@prisma/client';
+import { OrderStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { InventoryService } from '../inventory/inventory.service';
 import { toNumber } from '../common/decimal.util';
+import { ChannelScopeService } from '../common/channel-scope/channel-scope.service';
+import { JwtPayload } from '../auth/types/jwt-payload.type';
 import {
   BUSINESS_TIMEZONE,
   businessToday,
@@ -45,14 +47,74 @@ export class ReportsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly inventoryService: InventoryService,
+    private readonly channelScope: ChannelScopeService,
   ) {}
+
+  // Every report is order- or product-driven, so scoping comes down to two
+  // shapes: a Prisma `where` fragment for orders (channelId column exists
+  // directly), and a raw-SQL fragment for the two $queryRaw dashboard
+  // queries that can't take a Prisma where object — both derived from the
+  // one `ChannelScopeService.resolveDirectFilter()` resolution (the same
+  // resolver Orders/Channels use) so a requested `channelId` (the Store
+  // Selector narrowing to one specific store) and the "all my assigned
+  // stores" default can never drift out of sync between endpoints.
+  private async orderWhereFilter(
+    user: JwtPayload,
+    requestedChannelId?: string,
+  ): Promise<Prisma.OrderWhereInput> {
+    return this.channelScope.resolveDirectFilter(user, requestedChannelId);
+  }
+
+  private async orderChannelSqlFragment(
+    user: JwtPayload,
+    requestedChannelId?: string,
+  ): Promise<Prisma.Sql> {
+    const resolved = await this.channelScope.resolveDirectFilter(
+      user,
+      requestedChannelId,
+    );
+    if (!resolved.channelId) return Prisma.empty;
+    if (typeof resolved.channelId === 'string') {
+      return Prisma.sql`AND "channelId" = ${resolved.channelId}`;
+    }
+    // Empty set must exclude every row, not match every row — an
+    // unassigned/zero-channel restricted user must see zero orders here,
+    // same fail-closed rule as everywhere else channel scope applies.
+    return Prisma.sql`AND "channelId" = ANY(${resolved.channelId.in})`;
+  }
+
+  // Stock valuation has no channelId column (inventory is centralized) —
+  // scoping goes through the same EXISTS(ProductChannel) rule Products/
+  // Customers use elsewhere (ARCHITECTURE.md §16), not a direct column.
+  private async productWhereFilter(
+    user: JwtPayload,
+    requestedChannelId?: string,
+  ): Promise<Prisma.ProductWhereInput> {
+    const resolved = await this.channelScope.resolveDirectFilter(
+      user,
+      requestedChannelId,
+    );
+    if (!resolved.channelId) return {};
+    const channelFilter =
+      typeof resolved.channelId === 'string'
+        ? resolved.channelId
+        : { in: resolved.channelId.in };
+    return {
+      channels: { some: { channelId: channelFilter, isPublished: true } },
+    };
+  }
 
   // Every query here either hits an indexed column (createdAt, status,
   // channelId — see schema) or scans a small, bounded result set (recent
   // orders, low stock). At real scale this is the first thing worth
   // moving to a materialized view refreshed on a schedule rather than
   // computed live on every dashboard load — not needed at current volume.
-  async getDashboard() {
+  async getDashboard(user: JwtPayload, channelId?: string) {
+    const [orderWhere, channelSql] = await Promise.all([
+      this.orderWhereFilter(user, channelId),
+      this.orderChannelSqlFragment(user, channelId),
+    ]);
+
     const [
       todayRows,
       statusGroups,
@@ -69,21 +131,29 @@ export class ReportsService {
         WHERE status != 'CANCELLED'
           AND ("createdAt" AT TIME ZONE ${BUSINESS_TIMEZONE})::date
               = (now() AT TIME ZONE ${BUSINESS_TIMEZONE})::date
+          ${channelSql}
       `,
-      this.prisma.order.groupBy({ by: ['status'], _count: true }),
+      this.prisma.order.groupBy({
+        by: ['status'],
+        where: orderWhere,
+        _count: true,
+      }),
       this.prisma.order.groupBy({
         by: ['channelId'],
+        where: orderWhere,
         _count: true,
         _sum: { total: true },
       }),
       this.prisma.channel.findMany({ select: { id: true, name: true } }),
       this.prisma.order.groupBy({
         by: ['source'],
+        where: orderWhere,
         _count: true,
         _sum: { total: true },
       }),
       this.inventoryService.findAll({ lowStockOnly: true }),
       this.prisma.order.findMany({
+        where: orderWhere,
         take: 10,
         orderBy: { createdAt: 'desc' },
         include: {
@@ -99,6 +169,7 @@ export class ReportsService {
         WHERE status != 'CANCELLED'
           AND ("createdAt" AT TIME ZONE ${BUSINESS_TIMEZONE})
               >= (now() AT TIME ZONE ${BUSINESS_TIMEZONE})::date - interval '6 days'
+          ${channelSql}
         GROUP BY day
         ORDER BY day ASC
       `,
@@ -154,12 +225,19 @@ export class ReportsService {
   // dashboard's ordersByChannel, which intentionally includes cancelled
   // orders for activity visibility; this is a sales/revenue report, so
   // cancelled orders are excluded here, same as "today's sales".
-  async getSalesByChannel(from?: string, to?: string) {
+  async getSalesByChannel(
+    user: JwtPayload,
+    from?: string,
+    to?: string,
+    channelId?: string,
+  ) {
     const range = resolveDateRange(from, to);
+    const orderWhere = await this.orderWhereFilter(user, channelId);
     const [groups, channels] = await Promise.all([
       this.prisma.order.groupBy({
         by: ['channelId'],
         where: {
+          ...orderWhere,
           status: { not: 'CANCELLED' },
           createdAt: { gte: range.gte, lte: range.lte },
         },
@@ -191,11 +269,14 @@ export class ReportsService {
   // week/month boundaries are genuinely fiddly to replicate correctly in
   // JS); AT TIME ZONE keeps those boundaries Dhaka-local.
   async getSalesByPeriod(
+    user: JwtPayload,
     from?: string,
     to?: string,
     groupBy: SalesPeriodUnit = 'day',
+    channelId?: string,
   ) {
     const range = resolveDateRange(from, to);
+    const channelSql = await this.orderChannelSqlFragment(user, channelId);
     const rows = await this.prisma.$queryRaw<PeriodSalesRow[]>`
       SELECT date_trunc(${groupBy}, "createdAt" AT TIME ZONE ${BUSINESS_TIMEZONE}) as period,
              COUNT(*) as "orderCount",
@@ -203,6 +284,7 @@ export class ReportsService {
       FROM orders
       WHERE status != 'CANCELLED'
         AND "createdAt" >= ${range.gte} AND "createdAt" <= ${range.lte}
+        ${channelSql}
       GROUP BY period
       ORDER BY period ASC
     `;
@@ -220,16 +302,20 @@ export class ReportsService {
 
   // Best-selling products by quantity or revenue over a date range.
   async getTopProducts(
+    user: JwtPayload,
     from?: string,
     to?: string,
     limit = 10,
     sortBy: TopProductsSortBy = 'revenue',
+    channelId?: string,
   ) {
     const range = resolveDateRange(from, to);
+    const orderWhere = await this.orderWhereFilter(user, channelId);
     const rows = await this.prisma.orderItem.groupBy({
       by: ['productId'],
       where: {
         order: {
+          ...orderWhere,
           status: { not: 'CANCELLED' },
           createdAt: { gte: range.gte, lte: range.lte },
         },
@@ -263,9 +349,10 @@ export class ReportsService {
 
   // currentStock × costPrice per product — "how much money is sitting on
   // the shelves right now." A point-in-time snapshot, not date-ranged.
-  async getStockValuation() {
+  async getStockValuation(user: JwtPayload, channelId?: string) {
+    const productWhere = await this.productWhereFilter(user, channelId);
     const products = await this.prisma.product.findMany({
-      where: { deletedAt: null },
+      where: { deletedAt: null, ...productWhere },
       include: { inventory: true },
     });
 
