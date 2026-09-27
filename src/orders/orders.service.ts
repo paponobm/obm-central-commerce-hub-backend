@@ -78,7 +78,7 @@ export class OrdersService {
       user,
       filters.channelId,
     );
-    return this.prisma.order.findMany({
+    const orders = await this.prisma.order.findMany({
       where: {
         ...channelFilter,
         ...(filters.status ? { status: filters.status } : {}),
@@ -156,6 +156,57 @@ export class OrdersService {
       },
       orderBy: { createdAt: 'desc' },
     });
+
+    const successRateByCustomer = await this.getCustomerSuccessRates(
+      orders.map((o) => o.customerId),
+    );
+    return orders.map((o) => ({
+      ...o,
+      customer: {
+        ...o.customer,
+        successRate: successRateByCustomer.get(o.customerId) ?? null,
+      },
+    }));
+  }
+
+  // Delivered orders as a share of that customer's own past orders, with
+  // CANCELLED/LOST excluded from both sides — those never had a real chance
+  // to be delivered, so counting them would understate an otherwise-reliable
+  // customer's rate. Scoped to only the customerIds actually on this page
+  // rather than the whole table, since this runs on every order-list fetch.
+  private async getCustomerSuccessRates(
+    customerIds: string[],
+  ): Promise<Map<string, number>> {
+    const uniqueIds = [...new Set(customerIds)];
+    if (uniqueIds.length === 0) return new Map();
+
+    const grouped = await this.prisma.order.groupBy({
+      by: ['customerId', 'status'],
+      where: {
+        customerId: { in: uniqueIds },
+        status: { notIn: ['CANCELLED', 'LOST'] },
+      },
+      _count: true,
+    });
+
+    const totals = new Map<string, { delivered: number; eligible: number }>();
+    for (const row of grouped) {
+      const entry = totals.get(row.customerId) ?? {
+        delivered: 0,
+        eligible: 0,
+      };
+      entry.eligible += row._count;
+      if (row.status === 'DELIVERED') entry.delivered += row._count;
+      totals.set(row.customerId, entry);
+    }
+
+    const rates = new Map<string, number>();
+    for (const [customerId, { delivered, eligible }] of totals) {
+      if (eligible > 0) {
+        rates.set(customerId, Math.round((delivered / eligible) * 100));
+      }
+    }
+    return rates;
   }
 
   async findOne(id: string, user: JwtPayload) {
