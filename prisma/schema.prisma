@@ -24,11 +24,16 @@ enum OrderStatus {
   PENDING
   CONFIRMED
   PROCESSING
-  READY_TO_SHIP
+  READY_TO_SHIP // labeled "RTS" in the admin UI
   SHIPPED
+  PARTIAL // shipped, only some items delivered/confirmed so far
   DELIVERED
-  CANCELLED
+  PENDING_RETURN // customer/courier has started a return, goods not back yet
   RETURNED
+  PENDING_CANCEL // cancellation requested, not yet finalized — stock stays reserved
+  CANCELLED
+  PREORDER // booked ahead of stock arriving; otherwise behaves like PENDING
+  LOST // shipped, then lost in transit — stock was already deducted at ship time
 }
 
 // Tracks whether a customer has actually been reached and how they

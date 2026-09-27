@@ -26,15 +26,25 @@ import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
 import { UpdateCustomerResponseDto } from './dto/update-customer-response.dto';
 
 // The order lifecycle (ARCHITECTURE.md §7.2). Empty array = terminal state.
+// PENDING_CANCEL/PARTIAL/PENDING_RETURN/LOST/PREORDER are additive labels —
+// none of them trigger a stock movement on their own (see the dispatch
+// below): PENDING_CANCEL keeps stock reserved until the cancellation is
+// actually finalized, PARTIAL/LOST/PENDING_RETURN all follow SHIPPED (which
+// already deducted stock), and PREORDER reserves stock exactly like PENDING.
 const TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
-  PENDING: ['CONFIRMED', 'CANCELLED'],
-  CONFIRMED: ['PROCESSING', 'CANCELLED'],
-  PROCESSING: ['READY_TO_SHIP', 'CANCELLED'],
-  READY_TO_SHIP: ['SHIPPED', 'CANCELLED'],
-  SHIPPED: ['DELIVERED', 'RETURNED'],
-  DELIVERED: ['RETURNED'],
-  CANCELLED: [],
+  PENDING: ['CONFIRMED', 'PREORDER', 'PENDING_CANCEL', 'CANCELLED'],
+  CONFIRMED: ['PROCESSING', 'PENDING_CANCEL', 'CANCELLED'],
+  PROCESSING: ['READY_TO_SHIP', 'PENDING_CANCEL', 'CANCELLED'],
+  READY_TO_SHIP: ['SHIPPED', 'PENDING_CANCEL', 'CANCELLED'],
+  SHIPPED: ['DELIVERED', 'PARTIAL', 'PENDING_RETURN', 'LOST'],
+  PARTIAL: ['DELIVERED', 'PENDING_RETURN', 'RETURNED'],
+  DELIVERED: ['PENDING_RETURN', 'RETURNED'],
+  PENDING_RETURN: ['RETURNED'],
   RETURNED: [],
+  PENDING_CANCEL: ['PENDING', 'CANCELLED'],
+  CANCELLED: [],
+  PREORDER: ['PENDING', 'CANCELLED'],
+  LOST: [],
 };
 
 interface StockRow {
@@ -129,7 +139,20 @@ export class OrdersService {
       include: {
         customer: { select: { id: true, name: true, phone: true } },
         channel: { select: { id: true, name: true, slug: true } },
-        items: true,
+        createdBy: { select: { id: true, name: true } },
+        items: {
+          include: {
+            product: {
+              select: {
+                images: {
+                  take: 1,
+                  orderBy: { sortOrder: 'asc' },
+                  select: { url: true },
+                },
+              },
+            },
+          },
+        },
       },
       orderBy: { createdAt: 'desc' },
     });
@@ -515,7 +538,9 @@ export class OrdersService {
               ? 'DELIVERED'
               : dto.status === 'RETURNED'
                 ? 'RETURNED'
-                : undefined;
+                : dto.status === 'LOST'
+                  ? 'FAILED'
+                  : undefined;
 
         const updated = await tx.order.update({
           where: { id },

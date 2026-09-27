@@ -17,9 +17,14 @@ const ALL_STATUSES: OrderStatus[] = [
   'PROCESSING',
   'READY_TO_SHIP',
   'SHIPPED',
+  'PARTIAL',
   'DELIVERED',
-  'CANCELLED',
+  'PENDING_RETURN',
   'RETURNED',
+  'PENDING_CANCEL',
+  'CANCELLED',
+  'PREORDER',
+  'LOST',
 ];
 
 export type SalesPeriodUnit = 'day' | 'week' | 'month';
