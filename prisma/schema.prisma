@@ -391,6 +391,10 @@ model Order {
   shippingPhone   String
   shippingAddress String
   notes           String?
+  // Informational only, set at order-creation time (before a Shipment even
+  // exists) — e.g. "Steadfast", "Pathao". Distinct from Shipment.courierName,
+  // which is set later, when the order actually ships.
+  deliveryMethod  String?
 
   createdById String? // staff user for MANUAL/PHONE/etc orders; null for WEBSITE
   createdAt   DateTime @default(now())

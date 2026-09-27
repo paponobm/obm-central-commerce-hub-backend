@@ -330,7 +330,16 @@ export class ReportsService {
 
     const products = await this.prisma.product.findMany({
       where: { id: { in: rows.map((r) => r.productId) } },
-      select: { id: true, sku: true, name: true },
+      select: {
+        id: true,
+        sku: true,
+        name: true,
+        images: {
+          take: 1,
+          orderBy: { sortOrder: 'asc' },
+          select: { url: true },
+        },
+      },
     });
     const productById = new Map(products.map((p) => [p.id, p]));
 
@@ -341,6 +350,7 @@ export class ReportsService {
         productId: r.productId,
         sku: productById.get(r.productId)?.sku ?? null,
         name: productById.get(r.productId)?.name ?? 'Unknown product',
+        image: productById.get(r.productId)?.images[0]?.url ?? null,
         quantitySold: r._sum.quantity ?? 0,
         revenue: toNumber(r._sum.total),
       })),

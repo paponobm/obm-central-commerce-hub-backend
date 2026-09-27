@@ -75,13 +75,34 @@ export class CreateOrderDto {
   @IsString()
   notes?: string;
 
+  // Informational only — see the matching column comment in schema.prisma.
+  @IsOptional()
+  @IsString()
+  deliveryMethod?: string;
+
   @IsOptional()
   @IsEnum(PaymentMethod)
   paymentMethod?: PaymentMethod;
 
   // true = collected in full at order time (e.g. bKash confirmed up front).
-  // Omitted/false = UNPAID (COD, "due" per the manual-order spec).
+  // Omitted/false = UNPAID (COD, "due" per the manual-order spec). Superseded
+  // by advanceAmount when that's provided — kept for the storefront's guest
+  // checkout, which only ever sends `isPaid: false`.
   @IsOptional()
   @IsBoolean()
   isPaid?: boolean;
+
+  // A partial payment collected up front (e.g. a bKash booking advance),
+  // balance due on delivery. 0/omitted = UNPAID, >= the order total = PAID,
+  // anything in between = PARTIAL — see PaymentStatus in schema.prisma.
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  advanceAmount?: number;
+
+  // e.g. a bKash/Nagad reference number for the advance payment — recorded
+  // on the Payment row, never used to identify/verify the payment itself.
+  @IsOptional()
+  @IsString()
+  transactionId?: string;
 }

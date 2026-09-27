@@ -328,6 +328,17 @@ export class OrdersService {
       throw new BadRequestException('Order total cannot be negative');
     }
 
+    // advanceAmount is the richer primitive; isPaid (full payment) is just
+    // "advance == total" expressed as a boolean, kept for the storefront's
+    // guest checkout which only ever sends `isPaid: false`.
+    const advanceAmount = dto.advanceAmount ?? (dto.isPaid ? total : 0);
+    const paymentStatus =
+      advanceAmount <= 0
+        ? 'UNPAID'
+        : advanceAmount >= total
+          ? 'PAID'
+          : 'PARTIAL';
+
     return runTransaction(
       this.prisma,
       async (tx) => {
@@ -359,7 +370,7 @@ export class OrdersService {
             source: dto.source,
             customerId: customer.id,
             status: 'PENDING',
-            paymentStatus: dto.isPaid ? 'PAID' : 'UNPAID',
+            paymentStatus,
             shipmentStatus: 'NOT_SHIPPED',
             subtotal,
             discount: orderDiscount,
@@ -369,6 +380,7 @@ export class OrdersService {
             shippingPhone,
             shippingAddress,
             notes: dto.notes,
+            deliveryMethod: dto.deliveryMethod,
             createdById: actorUserId,
             items: {
               create: lineItems.map((li) => ({
@@ -422,13 +434,14 @@ export class OrdersService {
         await tx.stockMovement.createMany({ data: movements });
 
         let payment = null;
-        if (dto.isPaid) {
+        if (advanceAmount > 0) {
           payment = await tx.payment.create({
             data: {
               orderId: order.id,
               method: dto.paymentMethod ?? 'OTHER',
-              amount: total,
-              status: 'PAID',
+              amount: advanceAmount,
+              status: paymentStatus === 'PAID' ? 'PAID' : 'PARTIAL',
+              transactionId: dto.transactionId,
               paidAt: new Date(),
             },
           });
