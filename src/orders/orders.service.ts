@@ -22,8 +22,10 @@ import {
 import { JwtPayload } from '../auth/types/jwt-payload.type';
 import { CustomersService } from '../customers/customers.service';
 import { CreateOrderDto } from './dto/create-order.dto';
+import { UpdateOrderDto } from './dto/update-order.dto';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
 import { UpdateCustomerResponseDto } from './dto/update-customer-response.dto';
+import { RecordPaymentDto } from './dto/record-payment.dto';
 
 // The order lifecycle (ARCHITECTURE.md §7.2). Empty array = terminal state.
 // PENDING_CANCEL/PARTIAL/PENDING_RETURN/LOST/PREORDER are additive labels —
@@ -46,6 +48,20 @@ const TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
   PREORDER: ['PENDING', 'CANCELLED'],
   LOST: [],
 };
+
+// Content editing (items/customer/discount/etc, via updateOrder) is only
+// safe while stock is merely *reserved* — the same set the frontend uses
+// to decide when the row-level Cancel action is offered. Once SHIPPED,
+// stock has actually been deducted, so changing items would silently
+// desync the reservation/deduction accounting.
+const EDITABLE_STATUSES = new Set<OrderStatus>([
+  'PENDING',
+  'CONFIRMED',
+  'PROCESSING',
+  'READY_TO_SHIP',
+  'PENDING_CANCEL',
+  'PREORDER',
+]);
 
 interface StockRow {
   currentStock: number;
@@ -215,7 +231,19 @@ export class OrdersService {
       include: {
         customer: true,
         channel: true,
-        items: true,
+        items: {
+          include: {
+            product: {
+              select: {
+                images: {
+                  take: 1,
+                  orderBy: { sortOrder: 'asc' },
+                  select: { url: true },
+                },
+              },
+            },
+          },
+        },
         statusHistory: {
           orderBy: { createdAt: 'asc' },
           include: { changedBy: { select: { id: true, name: true } } },
@@ -542,6 +570,258 @@ export class OrdersService {
       },
       { timeout: 15000, maxWait: 5000 },
     );
+  }
+
+  // Content-only edit — customer/shipping info, line items, discount,
+  // delivery charge. Mirrors createOrder's pricing/stock logic exactly
+  // (same channel-price fallback, same reserve-per-item loop) since it's
+  // effectively re-deriving the order from a new item set. Status and
+  // payments are untouched here — status has its own endpoint, and a
+  // payment is only ever added via recordPayment, never overwritten.
+  async updateOrder(
+    id: string,
+    dto: UpdateOrderDto,
+    actorUserId: string | undefined,
+    user: JwtPayload,
+  ) {
+    const order = await this.prisma.order.findUnique({
+      where: { id },
+      include: { items: true, payments: true },
+    });
+    if (!order) {
+      throw new NotFoundException(`Order ${id} not found`);
+    }
+    await this.assertChannelAccess(user, order.channelId);
+
+    if (!EDITABLE_STATUSES.has(order.status)) {
+      throw new BadRequestException(
+        `Order ${order.orderNumber} can no longer be edited (status: ${order.status})`,
+      );
+    }
+
+    const productIds = [...new Set(dto.items.map((i) => i.productId))];
+    const products = await this.prisma.product.findMany({
+      where: { id: { in: productIds }, deletedAt: null },
+    });
+    const productMap = new Map(products.map((p) => [p.id, p]));
+    for (const item of dto.items) {
+      if (!productMap.has(item.productId)) {
+        throw new NotFoundException(`Product ${item.productId} not found`);
+      }
+    }
+
+    const channelPrices = new Map<string, number>();
+    if (order.channelId) {
+      const overrides = await this.prisma.productChannel.findMany({
+        where: { channelId: order.channelId, productId: { in: productIds } },
+      });
+      for (const o of overrides) {
+        channelPrices.set(o.productId, toNumber(o.price));
+      }
+    }
+
+    const lineItems = dto.items.map((item) => {
+      const product = productMap.get(item.productId)!;
+      const unitPrice =
+        item.unitPrice ??
+        channelPrices.get(item.productId) ??
+        toNumber(product.basePrice);
+      const discount = item.discount ?? 0;
+      const total = item.quantity * unitPrice - discount;
+      if (total < 0) {
+        throw new BadRequestException(
+          `Discount exceeds line total for ${product.sku}`,
+        );
+      }
+      return {
+        productId: product.id,
+        productName: product.name,
+        sku: product.sku,
+        quantity: item.quantity,
+        unitPrice,
+        discount,
+        total,
+      };
+    });
+
+    const subtotal = lineItems.reduce((sum, li) => sum + li.total, 0);
+    const orderDiscount = dto.discount ?? toNumber(order.discount);
+    const shippingFee = dto.shippingFee ?? toNumber(order.shippingFee);
+    const total = subtotal - orderDiscount + shippingFee;
+    if (total < 0) {
+      throw new BadRequestException('Order total cannot be negative');
+    }
+
+    // The edit itself never touches payments, but a smaller total after
+    // editing (e.g. removing an item) can turn an already-PARTIAL order
+    // PAID, or vice versa — so paymentStatus is re-derived against the
+    // existing payments rather than left stale.
+    const paidSoFar = order.payments
+      .filter((p) => p.status !== 'REFUNDED')
+      .reduce((sum, p) => sum + toNumber(p.amount), 0);
+    const paymentStatus: PaymentStatus =
+      paidSoFar <= 0 ? 'UNPAID' : paidSoFar >= total ? 'PAID' : 'PARTIAL';
+
+    return runTransaction(
+      this.prisma,
+      async (tx) => {
+        let customerId = order.customerId;
+        if (dto.customerId || dto.customerName || dto.customerPhone) {
+          const customer = await this.customersService.resolveCustomer(
+            {
+              customerId: dto.customerId,
+              name: dto.customerName,
+              phone: dto.customerPhone,
+              email: dto.customerEmail,
+            },
+            tx,
+          );
+          customerId = customer.id;
+        }
+
+        // Release the OLD reservation, then re-reserve for the NEW item set
+        // — both inside this one transaction, so a failed re-reservation
+        // rolls back the release too (never left holding neither the old
+        // nor the new stock).
+        await this.releaseReservation(tx, order, actorUserId);
+
+        await tx.orderItem.deleteMany({ where: { orderId: id } });
+        await tx.orderItem.createMany({
+          data: lineItems.map((li) => ({
+            orderId: id,
+            productId: li.productId,
+            productName: li.productName,
+            sku: li.sku,
+            quantity: li.quantity,
+            unitPrice: li.unitPrice,
+            discount: li.discount,
+            total: li.total,
+          })),
+        });
+
+        const movements: Prisma.StockMovementCreateManyInput[] = [];
+        for (const li of lineItems) {
+          const rows = await tx.$queryRaw<StockRow[]>`
+            UPDATE inventory
+            SET "reservedStock" = "reservedStock" + ${li.quantity}, "updatedAt" = now()
+            WHERE "productId" = ${li.productId}
+              AND ("currentStock" - "reservedStock") >= ${li.quantity}
+            RETURNING "currentStock"
+          `;
+          if (rows.length === 0) {
+            throw new ConflictException(
+              `Insufficient stock for ${li.sku} (${li.productName})`,
+            );
+          }
+          movements.push({
+            productId: li.productId,
+            type: 'RESERVE',
+            quantity: li.quantity,
+            balanceAfter: rows[0].currentStock,
+            referenceType: 'ORDER',
+            referenceId: id,
+            note: `Reserved for order ${order.orderNumber} (edited)`,
+            createdById: actorUserId,
+          });
+        }
+        await tx.stockMovement.createMany({ data: movements });
+
+        const updated = await tx.order.update({
+          where: { id },
+          data: {
+            customerId,
+            shippingName: dto.customerName ?? order.shippingName,
+            shippingPhone: dto.customerPhone ?? order.shippingPhone,
+            shippingAddress: dto.shippingAddress ?? order.shippingAddress,
+            deliveryMethod: dto.deliveryMethod ?? order.deliveryMethod,
+            notes: dto.notes ?? order.notes,
+            subtotal,
+            discount: orderDiscount,
+            shippingFee,
+            total,
+            paymentStatus,
+          },
+          include: {
+            items: true,
+            customer: true,
+            channel: true,
+            payments: true,
+          },
+        });
+
+        await tx.auditLog.create({
+          data: {
+            userId: actorUserId,
+            action: 'order.edited',
+            entityType: 'Order',
+            entityId: id,
+            before: {
+              subtotal: toNumber(order.subtotal),
+              total: toNumber(order.total),
+            },
+            after: { subtotal, total },
+          },
+        });
+
+        return updated;
+      },
+      { timeout: 15000, maxWait: 5000 },
+    );
+  }
+
+  // Adds a payment against an existing order without touching its items or
+  // status — the counterpart to createOrder's initial-advance handling, for
+  // money collected after the fact (e.g. a bKash advance sent later, or a
+  // COD balance settled on delivery). paymentStatus is re-derived from the
+  // running total of every non-refunded payment, not just this one.
+  async recordPayment(
+    id: string,
+    dto: RecordPaymentDto,
+    actorUserId: string | undefined,
+    user: JwtPayload,
+  ) {
+    const order = await this.prisma.order.findUnique({
+      where: { id },
+      include: { payments: true },
+    });
+    if (!order) {
+      throw new NotFoundException(`Order ${id} not found`);
+    }
+    await this.assertChannelAccess(user, order.channelId);
+
+    if (order.status === 'CANCELLED') {
+      throw new BadRequestException(
+        'Cannot record a payment on a cancelled order',
+      );
+    }
+
+    const total = toNumber(order.total);
+    const paidSoFar = order.payments
+      .filter((p) => p.status !== 'REFUNDED')
+      .reduce((sum, p) => sum + toNumber(p.amount), 0);
+    const newPaidTotal = paidSoFar + dto.amount;
+    const paymentStatus: PaymentStatus =
+      newPaidTotal <= 0 ? 'UNPAID' : newPaidTotal >= total ? 'PAID' : 'PARTIAL';
+
+    const [, updatedOrder] = await this.prisma.$transaction([
+      this.prisma.payment.create({
+        data: {
+          orderId: id,
+          method: dto.method,
+          amount: dto.amount,
+          status: paymentStatus === 'PAID' ? 'PAID' : 'PARTIAL',
+          transactionId: dto.transactionId,
+          paidAt: new Date(),
+        },
+      }),
+      this.prisma.order.update({
+        where: { id },
+        data: { paymentStatus },
+        include: { items: true, customer: true, channel: true, payments: true },
+      }),
+    ]);
+
+    return updatedOrder;
   }
 
   async updateStatus(

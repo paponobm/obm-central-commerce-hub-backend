@@ -21,8 +21,10 @@ import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { JwtPayload } from '../auth/types/jwt-payload.type';
 import { OrdersService } from './orders.service';
 import { CreateOrderDto } from './dto/create-order.dto';
+import { UpdateOrderDto } from './dto/update-order.dto';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
 import { UpdateCustomerResponseDto } from './dto/update-customer-response.dto';
+import { RecordPaymentDto } from './dto/record-payment.dto';
 
 @Controller('admin/orders')
 @UseGuards(JwtAuthGuard, PermissionsGuard)
@@ -75,6 +77,26 @@ export class OrdersController {
   @RequirePermissions('orders.create')
   create(@Body() dto: CreateOrderDto, @CurrentUser() user: JwtPayload) {
     return this.ordersService.createOrder(dto, user.sub, user);
+  }
+
+  @Patch(':id')
+  @RequirePermissions('orders.create')
+  update(
+    @Param('id') id: string,
+    @Body() dto: UpdateOrderDto,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.ordersService.updateOrder(id, dto, user.sub, user);
+  }
+
+  @Post(':id/payments')
+  @RequirePermissions('payments.manage')
+  recordPayment(
+    @Param('id') id: string,
+    @Body() dto: RecordPaymentDto,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.ordersService.recordPayment(id, dto, user.sub, user);
   }
 
   @Patch(':id/status')
