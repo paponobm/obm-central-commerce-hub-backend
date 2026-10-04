@@ -173,16 +173,32 @@ export class OrdersService {
       orderBy: { createdAt: 'desc' },
     });
 
-    const successRateByCustomer = await this.getCustomerSuccessRates(
-      orders.map((o) => o.customerId),
-    );
+    const customerIds = orders.map((o) => o.customerId);
+    const successRateByCustomer =
+      await this.getCustomerSuccessRates(customerIds);
+    const orderCountByCustomer = await this.getCustomerOrderCounts(customerIds);
     return orders.map((o) => ({
       ...o,
       customer: {
         ...o.customer,
         successRate: successRateByCustomer.get(o.customerId) ?? null,
+        orderCount: orderCountByCustomer.get(o.customerId) ?? 0,
       },
     }));
+  }
+
+  private async getCustomerOrderCounts(
+    customerIds: string[],
+  ): Promise<Map<string, number>> {
+    const uniqueIds = [...new Set(customerIds)];
+    if (uniqueIds.length === 0) return new Map();
+
+    const grouped = await this.prisma.order.groupBy({
+      by: ['customerId'],
+      where: { customerId: { in: uniqueIds } },
+      _count: true,
+    });
+    return new Map(grouped.map((row) => [row.customerId, row._count]));
   }
 
   // Delivered orders as a share of that customer's own past orders, with

@@ -18,6 +18,7 @@ enum OrderSource {
   PHONE
   WHATSAPP
   OTHER
+  UNKNOWN
 }
 
 enum OrderStatus {
