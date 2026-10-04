@@ -177,14 +177,55 @@ export class OrdersService {
     const successRateByCustomer =
       await this.getCustomerSuccessRates(customerIds);
     const orderCountByCustomer = await this.getCustomerOrderCounts(customerIds);
+    const printedIds = await this.getPrintedOrderIds(orders.map((o) => o.id));
     return orders.map((o) => ({
       ...o,
+      invoicePrinted: printedIds.has(o.id),
       customer: {
         ...o.customer,
         successRate: successRateByCustomer.get(o.customerId) ?? null,
         orderCount: orderCountByCustomer.get(o.customerId) ?? 0,
       },
     }));
+  }
+
+  // Print history lives in the audit log rather than a column, so recording a
+  // print needs no schema change. Only the set of printed ids is returned.
+  private async getPrintedOrderIds(orderIds: string[]): Promise<Set<string>> {
+    if (orderIds.length === 0) return new Set();
+    const logs = await this.prisma.auditLog.findMany({
+      where: {
+        action: 'order.invoice_printed',
+        entityType: 'Order',
+        entityId: { in: orderIds },
+      },
+      select: { entityId: true },
+      distinct: ['entityId'],
+    });
+    return new Set(logs.map((l) => l.entityId));
+  }
+
+  async markInvoicesPrinted(
+    orderIds: string[],
+    actorUserId: string | undefined,
+    user: JwtPayload,
+  ) {
+    const orders = await this.prisma.order.findMany({
+      where: { id: { in: orderIds } },
+      select: { id: true, channelId: true },
+    });
+    for (const order of orders) {
+      await this.assertChannelAccess(user, order.channelId);
+    }
+    await this.prisma.auditLog.createMany({
+      data: orders.map((o) => ({
+        userId: actorUserId,
+        action: 'order.invoice_printed',
+        entityType: 'Order',
+        entityId: o.id,
+      })),
+    });
+    return { marked: orders.length };
   }
 
   private async getCustomerOrderCounts(

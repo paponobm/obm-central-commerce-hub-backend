@@ -25,6 +25,7 @@ import { UpdateOrderDto } from './dto/update-order.dto';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
 import { UpdateCustomerResponseDto } from './dto/update-customer-response.dto';
 import { RecordPaymentDto } from './dto/record-payment.dto';
+import { MarkPrintedDto } from './dto/mark-printed.dto';
 
 @Controller('admin/orders')
 @UseGuards(JwtAuthGuard, PermissionsGuard)
@@ -87,6 +88,12 @@ export class OrdersController {
     @CurrentUser() user: JwtPayload,
   ) {
     return this.ordersService.updateOrder(id, dto, user.sub, user);
+  }
+
+  @Post('print-log')
+  @RequirePermissions('orders.view')
+  markPrinted(@Body() dto: MarkPrintedDto, @CurrentUser() user: JwtPayload) {
+    return this.ordersService.markInvoicesPrinted(dto.orderIds, user.sub, user);
   }
 
   @Post(':id/payments')
