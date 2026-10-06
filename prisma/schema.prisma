@@ -1,5 +1,6 @@
 generator client {
   provider = "prisma-client-js"
+  previewFeatures = ["relationJoins"]
 }
 
 datasource db {
@@ -43,6 +44,9 @@ enum OrderStatus {
 // See ARCHITECTURE.md §17.
 enum CustomerResponseStatus {
   NO_RESPONSE
+  GOOD_BUT_NO_RESPONSE
+  ON_HOLD
+  ADVANCE_PAYMENT
   CALL_BACK
   INTERESTED
   NOT_INTERESTED
@@ -195,7 +199,12 @@ model CheckoutLead {
   phone     String
   name      String?
   address   String?
-  items     Json // [{ productId, quantity, unitPrice }] as last entered
+  items     Json // [{ productId, quantity, unitPrice }] as the customer entered them
+  // Items as the admin is preparing them in Ordered products; empty until edited.
+  adminItems Json?
+  // Empty until set from Order actions; an empty response keeps the lead in Incomplete.
+  // Carried to the order when it is created.
+  customerResponse CustomerResponseStatus?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

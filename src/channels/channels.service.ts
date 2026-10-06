@@ -44,18 +44,32 @@ export class ChannelsService {
   // product/order counts.
   async findAllWithStats(user: JwtPayload, includeInactive = false) {
     const channels = await this.findAll(user, includeInactive);
+    if (channels.length === 0) return [];
 
-    return Promise.all(
-      channels.map(async (channel) => {
-        const [productCount, orderCount] = await Promise.all([
-          this.prisma.productChannel.count({
-            where: { channelId: channel.id, isPublished: true },
-          }),
-          this.prisma.order.count({ where: { channelId: channel.id } }),
-        ]);
-        return { ...channel, productCount, orderCount };
+    // Two grouped queries cover every channel, instead of two counts per channel.
+    const channelIds = channels.map((c) => c.id);
+    const [productRows, orderRows] = await Promise.all([
+      this.prisma.productChannel.groupBy({
+        by: ['channelId'],
+        where: { channelId: { in: channelIds }, isPublished: true },
+        _count: true,
       }),
+      this.prisma.order.groupBy({
+        by: ['channelId'],
+        where: { channelId: { in: channelIds } },
+        _count: true,
+      }),
+    ]);
+    const productCounts = new Map(productRows.map((r) => [r.channelId, r._count]));
+    const orderCounts = new Map(
+      orderRows.map((r) => [r.channelId, r._count]),
     );
+
+    return channels.map((channel) => ({
+      ...channel,
+      productCount: productCounts.get(channel.id) ?? 0,
+      orderCount: orderCounts.get(channel.id) ?? 0,
+    }));
   }
 
   async findOne(id: string, user: JwtPayload) {

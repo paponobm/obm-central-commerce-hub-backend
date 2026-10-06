@@ -1,7 +1,6 @@
 import {
   Body,
   Controller,
-  Delete,
   Get,
   Param,
   Patch,
@@ -27,6 +26,7 @@ import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
 import { UpdateCustomerResponseDto } from './dto/update-customer-response.dto';
 import { RecordPaymentDto } from './dto/record-payment.dto';
 import { MarkPrintedDto } from './dto/mark-printed.dto';
+import { UpdateCheckoutLeadDto } from './dto/update-checkout-lead.dto';
 import { AddOrderNoteDto } from './dto/add-order-note.dto';
 
 @Controller('admin/orders')
@@ -115,10 +115,52 @@ export class OrdersController {
     return this.ordersService.addOrderNote(id, dto.note, user.sub, user);
   }
 
-  @Delete('checkout-leads/:id')
-  @RequirePermissions('orders.create')
-  deleteCheckoutLead(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
-    return this.ordersService.deleteCheckoutLead(id, user);
+  @Get('checkout-leads/:id/activity')
+  @RequirePermissions('orders.view')
+  listCheckoutLeadActivity(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
+    return this.ordersService.listCheckoutLeadActivity(id, user);
+  }
+
+  @Get(':id/activity')
+  @RequirePermissions('orders.view')
+  listOrderActivity(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
+    return this.ordersService.listOrderActivity(id, user);
+  }
+
+  @Get('checkout-leads/:id/notes')
+  @RequirePermissions('orders.view')
+  listCheckoutLeadNotes(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
+    return this.ordersService.listCheckoutLeadNotes(id, user);
+  }
+
+  @Patch('checkout-leads/:id')
+  @RequirePermissions('orders.update_status')
+  updateCheckoutLead(
+    @Param('id') id: string,
+    @Body() dto: UpdateCheckoutLeadDto,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.ordersService.updateCheckoutLead(id, dto, user);
+  }
+
+  @Patch('checkout-leads/:id/customer-response')
+  @RequirePermissions('orders.update_status')
+  updateCheckoutLeadResponse(
+    @Param('id') id: string,
+    @Body() dto: UpdateCustomerResponseDto,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.ordersService.updateCheckoutLeadResponse(id, dto, user);
+  }
+
+  @Post('checkout-leads/:id/notes')
+  @RequirePermissions('orders.update_status')
+  addCheckoutLeadNote(
+    @Param('id') id: string,
+    @Body() dto: AddOrderNoteDto,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.ordersService.addCheckoutLeadNote(id, dto.note, user.sub, user);
   }
 
   @Post(':id/web-approve')

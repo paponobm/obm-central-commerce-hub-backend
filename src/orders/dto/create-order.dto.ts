@@ -30,6 +30,12 @@ export class CreateOrderDto {
   @IsString()
   customerId?: string;
 
+  // Set when the order is created from an Incomplete checkout lead. The lead
+  // is removed and its notes move to the order, in the same transaction.
+  @IsOptional()
+  @IsString()
+  checkoutLeadId?: string;
+
   @IsOptional()
   @IsString()
   customerName?: string;

@@ -6,6 +6,8 @@ import { toNumber } from '../common/decimal.util';
 import { StorefrontCreateOrderDto } from './dto/storefront-create-order.dto';
 import { StorefrontCheckoutLeadDto } from './dto/storefront-checkout-lead.dto';
 
+// Join loading: the product, its images, category, brand and stock come back
+// in one round trip instead of one query per relation.
 const productChannelWithProduct =
   Prisma.validator<Prisma.ProductChannelDefaultArgs>()({
     include: {
@@ -89,6 +91,9 @@ export class StorefrontService {
       this.prisma.productChannel.findMany({
         where,
         ...productChannelWithProduct,
+        // Join loading: the product, images, category, brand and stock come back
+        // in one round trip instead of one query per relation.
+        relationLoadStrategy: 'join',
         orderBy: [{ sortOrder: 'asc' }, { createdAt: 'desc' }],
         skip: (page - 1) * limit,
         take: limit,
@@ -114,6 +119,9 @@ export class StorefrontService {
         product: { isActive: true, deletedAt: null },
       },
       ...productChannelWithProduct,
+      // Join loading: the product, images, category, brand and stock come back
+      // in one round trip instead of one query per relation.
+      relationLoadStrategy: 'join',
     });
     if (!pc) {
       throw new NotFoundException(`Product "${slug}" not found`);

@@ -26,6 +26,7 @@ import { UpdateOrderDto } from './dto/update-order.dto';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
 import { UpdateCustomerResponseDto } from './dto/update-customer-response.dto';
 import { RecordPaymentDto } from './dto/record-payment.dto';
+import { UpdateCheckoutLeadDto } from './dto/update-checkout-lead.dto';
 
 // The order lifecycle (ARCHITECTURE.md §7.2). Empty array = terminal state.
 // PENDING_CANCEL/PARTIAL/PENDING_RETURN/LOST/PREORDER are additive labels —
@@ -65,6 +66,35 @@ const EDITABLE_STATUSES = new Set<OrderStatus>([
 
 interface StockRow {
   currentStock: number;
+}
+
+// Human-readable Activity log lines for the audit rows written by this service.
+function describeOrderLog(action: string, after: unknown): string {
+  const data = (after ?? {}) as { note?: string; customerResponse?: string };
+  switch (action) {
+    case 'order.note':
+      return `Note added: ${data.note ?? ''}`;
+    case 'order.customer_response_change':
+      return `Customer response changed to ${(data.customerResponse ?? 'none').replaceAll('_', ' ')}`;
+    case 'order.web_approved':
+      return 'Approved from Web Orders';
+    default:
+      return action;
+  }
+}
+
+function describeLeadLog(action: string, after: unknown): string {
+  const data = (after ?? {}) as { note?: string; customerResponse?: string; items?: unknown };
+  switch (action) {
+    case 'order.note':
+      return `Note added: ${data.note ?? ''}`;
+    case 'checkout_lead.response_change':
+      return `Customer response changed to ${(data.customerResponse ?? 'none').replaceAll('_', ' ')}`;
+    case 'checkout_lead.update':
+      return data.items ? 'Products edited' : 'Details updated';
+    default:
+      return action;
+  }
 }
 
 @Injectable()
@@ -152,6 +182,9 @@ export class OrdersService {
             }
           : {}),
       },
+      // Join loading fetches the relations in the same round trip instead of
+      // one extra query per relation.
+      relationLoadStrategy: 'join',
       include: {
         customer: { select: { id: true, name: true, phone: true } },
         channel: { select: { id: true, name: true, slug: true } },
@@ -174,32 +207,36 @@ export class OrdersService {
     });
 
     const customerIds = orders.map((o) => o.customerId);
-    const successRateByCustomer =
-      await this.getCustomerSuccessRates(customerIds);
-    const orderCountByCustomer = await this.getCustomerOrderCounts(customerIds);
     const orderIds = orders.map((o) => o.id);
-    const printedIds = await this.getAuditedOrderIds(
-      'order.invoice_printed',
-      orderIds,
-    );
-    const webApprovedIds = await this.getAuditedOrderIds(
-      'order.web_approved',
-      orderIds,
-    );
-    return orders.map((o) => ({
-      ...o,
-      invoicePrinted: printedIds.has(o.id),
-      webApproved: webApprovedIds.has(o.id),
-      customer: {
-        ...o.customer,
-        successRate: successRateByCustomer.get(o.customerId) ?? null,
-        orderCount: orderCountByCustomer.get(o.customerId) ?? 0,
-      },
-    }));
+    // The two lookups are independent, so they run together.
+    const [customerStats, auditFlags, adminNotes, lastActivity] =
+      await Promise.all([
+        this.getCustomerStats(customerIds),
+        this.getAuditFlags(orderIds, [
+          'order.invoice_printed',
+          'order.web_approved',
+        ]),
+        this.getAdminNotes(orderIds),
+        this.getLastOrderActivity(orderIds),
+      ]);
+    return orders.map((o) => {
+      const stats = customerStats.get(o.customerId);
+      const flags = auditFlags.get(o.id);
+      return {
+        ...o,
+        invoicePrinted: flags?.has('order.invoice_printed') ?? false,
+        webApproved: flags?.has('order.web_approved') ?? false,
+        adminNotes: adminNotes.get(o.id) ?? [],
+        lastUpdate: lastActivity.get(o.id) ?? { at: o.updatedAt, by: null },
+        customer: {
+          ...o.customer,
+          successRate: stats?.successRate ?? null,
+          orderCount: stats?.orderCount ?? 0,
+        },
+      };
+    });
   }
 
-  // Print history lives in the audit log rather than a column, so recording a
-  // print needs no schema change. Only the set of printed ids is returned.
   private async getAuditedOrderIds(
     action: string,
     orderIds: string[],
@@ -327,18 +364,21 @@ export class OrdersService {
         name: true,
         address: true,
         items: true,
+        adminItems: true,
+        customerResponse: true,
         createdAt: true,
         updatedAt: true,
       },
     });
-    const storedItems = (lead: (typeof leads)[number]) =>
-      lead.items as unknown as {
-        productId: string;
-        quantity: number;
-        unitPrice: number;
-      }[];
+    type StoredLeadItem = { productId: string; quantity: number; unitPrice: number };
+    const storedItems = (stored: unknown) => (stored ?? []) as StoredLeadItem[];
     const productIds = [
-      ...new Set(leads.flatMap((l) => storedItems(l).map((i) => i.productId))),
+      ...new Set(
+        leads.flatMap((l) => [
+          ...storedItems(l.items),
+          ...storedItems(l.adminItems),
+        ]).map((i) => i.productId),
+      ),
     ];
     const products = await this.prisma.product.findMany({
       where: { id: { in: productIds } },
@@ -350,35 +390,322 @@ export class OrdersService {
       },
     });
     const productById = new Map(products.map((p) => [p.id, p]));
-    return leads.map((lead) => {
-      const items = storedItems(lead).map((i) => {
-        const product = productById.get(i.productId);
-        return {
-          productId: i.productId,
-          productName: product?.name ?? 'Unknown product',
-          sku: product?.sku ?? '',
-          image: product?.images[0]?.url ?? null,
-          quantity: i.quantity,
-          unitPrice: i.unitPrice,
-        };
+    const leadIds = leads.map((l) => l.id);
+    const [responseLogs, noteLogs] = await Promise.all([
+      this.prisma.auditLog.findMany({
+        where: {
+          entityType: 'CheckoutLead',
+          entityId: { in: leadIds },
+          action: { in: ['checkout_lead.response_change', 'checkout_lead.update'] },
+        },
+        orderBy: { createdAt: 'desc' },
+        distinct: ['entityId'],
+        select: {
+          entityId: true,
+          createdAt: true,
+          user: { select: { name: true } },
+        },
+      }),
+      this.prisma.auditLog.findMany({
+        where: {
+          entityType: 'CheckoutLead',
+          entityId: { in: leadIds },
+          action: 'order.note',
+        },
+        orderBy: { createdAt: 'asc' },
+        select: {
+          id: true,
+          entityId: true,
+          createdAt: true,
+          after: true,
+          user: { select: { name: true } },
+        },
+      }),
+    ]);
+    const notesByLead = new Map<
+      string,
+      { id: string; note: string; createdAt: Date; user: { name: string } | null }[]
+    >();
+    for (const n of noteLogs) {
+      const list = notesByLead.get(n.entityId) ?? [];
+      list.push({
+        id: n.id,
+        note: (n.after as { note?: string } | null)?.note ?? '',
+        createdAt: n.createdAt,
+        user: n.user,
       });
+      notesByLead.set(n.entityId, list);
+    }
+    const lastResponse = new Map(
+      responseLogs.map((l) => [
+        l.entityId,
+        { at: l.createdAt, by: l.user?.name ?? null },
+      ]),
+    );
+    return leads.map((lead) => {
+      const toLeadItems = (stored: StoredLeadItem[]) =>
+        stored.map((i) => {
+          const product = productById.get(i.productId);
+          return {
+            productId: i.productId,
+            productName: product?.name ?? 'Unknown product',
+            sku: product?.sku ?? '',
+            image: product?.images[0]?.url ?? null,
+            quantity: i.quantity,
+            unitPrice: i.unitPrice,
+          };
+        });
+      const items = toLeadItems(storedItems(lead.items));
+      const adminItems = lead.adminItems
+        ? toLeadItems(storedItems(lead.adminItems))
+        : null;
       const total = items.reduce((sum, i) => sum + i.quantity * i.unitPrice, 0);
-      return { ...lead, items, total };
+      const lastUpdate = lastResponse.get(lead.id) ?? {
+        at: lead.updatedAt,
+        by: null,
+      };
+      return {
+        ...lead,
+        items,
+        adminItems,
+        total,
+        lastUpdate,
+        adminNotes: notesByLead.get(lead.id) ?? [],
+      };
     });
   }
 
-  // Removes an Incomplete lead, e.g. once it has been turned into an order.
-  async deleteCheckoutLead(id: string, user: JwtPayload) {
-    const lead = await this.prisma.checkoutLead.findUnique({
+  // Everything logged against an order, newest first: status changes,
+  // customer-response changes, notes and web approval.
+  async listOrderActivity(id: string, user: JwtPayload) {
+    const order = await this.prisma.order.findUnique({
       where: { id },
-      select: { id: true, channelId: true },
+      select: { channelId: true },
+    });
+    if (!order) {
+      throw new NotFoundException(`Order ${id} not found`);
+    }
+    await this.assertChannelAccess(user, order.channelId);
+
+    const [logs, statusChanges] = await Promise.all([
+      this.prisma.auditLog.findMany({
+        where: {
+          entityType: 'Order',
+          entityId: id,
+          action: {
+            in: [
+              'order.note',
+              'order.customer_response_change',
+              'order.web_approved',
+            ],
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+        select: {
+          id: true,
+          action: true,
+          after: true,
+          createdAt: true,
+          user: { select: { name: true } },
+        },
+      }),
+      this.prisma.orderStatusHistory.findMany({
+        where: { orderId: id },
+        orderBy: { createdAt: 'desc' },
+        select: {
+          id: true,
+          toStatus: true,
+          createdAt: true,
+          changedBy: { select: { name: true } },
+        },
+      }),
+    ]);
+
+    const entries = [
+      ...statusChanges.map((h) => ({
+        key: `status-${h.id}`,
+        at: h.createdAt,
+        by: h.changedBy?.name ?? null,
+        text: `Order status changed to ${h.toStatus.replaceAll('_', ' ')}`,
+      })),
+      ...logs.map((l) => ({
+        key: `log-${l.id}`,
+        at: l.createdAt,
+        by: l.user?.name ?? null,
+        text: describeOrderLog(l.action, l.after),
+      })),
+    ];
+    return entries.sort((a, b) => b.at.getTime() - a.at.getTime());
+  }
+
+  // Everything logged against an Incomplete lead, newest first.
+  async listCheckoutLeadActivity(leadId: string, user: JwtPayload) {
+    await this.assertCheckoutLeadAccess(leadId, user);
+    const logs = await this.prisma.auditLog.findMany({
+      where: {
+        entityType: 'CheckoutLead',
+        entityId: leadId,
+        action: {
+          in: [
+            'order.note',
+            'checkout_lead.response_change',
+            'checkout_lead.update',
+          ],
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true,
+        action: true,
+        after: true,
+        createdAt: true,
+        user: { select: { name: true } },
+      },
+    });
+    return logs.map((l) => ({
+      key: `log-${l.id}`,
+      at: l.createdAt,
+      by: l.user?.name ?? null,
+      text: describeLeadLog(l.action, l.after),
+    }));
+  }
+
+  // Notes on an Incomplete lead. They move to the order if it is created
+  // from the lead (see createOrder).
+  async addCheckoutLeadNote(
+    leadId: string,
+    note: string,
+    actorUserId: string | undefined,
+    user: JwtPayload,
+  ) {
+    await this.assertCheckoutLeadAccess(leadId, user);
+    return this.prisma.auditLog.create({
+      data: {
+        userId: actorUserId,
+        action: 'order.note',
+        entityType: 'CheckoutLead',
+        entityId: leadId,
+        after: { note },
+      },
+      select: {
+        id: true,
+        createdAt: true,
+        after: true,
+        user: { select: { id: true, name: true } },
+      },
+    });
+  }
+
+  async listCheckoutLeadNotes(leadId: string, user: JwtPayload) {
+    await this.assertCheckoutLeadAccess(leadId, user);
+    return this.prisma.auditLog.findMany({
+      where: { entityType: 'CheckoutLead', entityId: leadId, action: 'order.note' },
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true,
+        createdAt: true,
+        after: true,
+        user: { select: { id: true, name: true } },
+      },
+    });
+  }
+
+  async updateCheckoutLeadResponse(
+    leadId: string,
+    dto: UpdateCustomerResponseDto,
+    user: JwtPayload,
+  ) {
+    await this.assertCheckoutLeadAccess(leadId, user);
+    const [lead] = await this.prisma.$transaction([
+      this.prisma.checkoutLead.update({
+        where: { id: leadId },
+        data: { customerResponse: dto.customerResponse },
+        select: { id: true, customerResponse: true },
+      }),
+      this.prisma.auditLog.create({
+        data: {
+          userId: user.sub,
+          action: 'checkout_lead.response_change',
+          entityType: 'CheckoutLead',
+          entityId: leadId,
+          after: { customerResponse: dto.customerResponse },
+        },
+      }),
+    ]);
+    return lead;
+  }
+
+  // Saves the admin's edits to an Incomplete checkout. The customer's own
+  // cart (items) is left as it was; the edits are kept separately as adminItems.
+  async updateCheckoutLead(
+    leadId: string,
+    dto: UpdateCheckoutLeadDto,
+    user: JwtPayload,
+  ) {
+    await this.assertCheckoutLeadAccess(leadId, user);
+    const lead = await this.prisma.checkoutLead.findUnique({
+      where: { id: leadId },
+      select: { channelId: true },
     });
     if (!lead) {
-      throw new NotFoundException(`Checkout lead ${id} not found`);
+      throw new NotFoundException(`Checkout lead ${leadId} not found`);
+    }
+
+    let adminItems: { productId: string; quantity: number; unitPrice: number }[] | undefined;
+    if (dto.items) {
+      const ids = dto.items.map((i) => i.productId);
+      const listed = await this.prisma.productChannel.findMany({
+        where: { channelId: lead.channelId, productId: { in: ids } },
+        select: { productId: true, price: true },
+      });
+      const priceById = new Map(listed.map((pc) => [pc.productId, toNumber(pc.price)]));
+      adminItems = dto.items.map((i) => {
+        const price = priceById.get(i.productId);
+        if (price === undefined) {
+          throw new BadRequestException(
+            `Product ${i.productId} is not available on this store`,
+          );
+        }
+        return {
+          productId: i.productId,
+          quantity: i.quantity,
+          unitPrice: i.unitPrice ?? price,
+        };
+      });
+    }
+
+    const [updated] = await this.prisma.$transaction([
+      this.prisma.checkoutLead.update({
+        where: { id: leadId },
+        data: {
+          name: dto.customerName,
+          address: dto.shippingAddress,
+          adminItems: adminItems as Prisma.InputJsonValue | undefined,
+        },
+        select: { id: true, updatedAt: true },
+      }),
+      this.prisma.auditLog.create({
+        data: {
+          userId: user.sub,
+          action: 'checkout_lead.update',
+          entityType: 'CheckoutLead',
+          entityId: leadId,
+          after: { items: adminItems ?? null },
+        },
+      }),
+    ]);
+    return updated;
+  }
+
+  private async assertCheckoutLeadAccess(leadId: string, user: JwtPayload) {
+    const lead = await this.prisma.checkoutLead.findUnique({
+      where: { id: leadId },
+      select: { channelId: true },
+    });
+    if (!lead) {
+      throw new NotFoundException(`Checkout lead ${leadId} not found`);
     }
     await this.assertChannelAccess(user, lead.channelId);
-    await this.prisma.checkoutLead.delete({ where: { id } });
-    return { id, deleted: true };
   }
 
   async markInvoicesPrinted(
@@ -404,63 +731,165 @@ export class OrdersService {
     return { marked: orders.length };
   }
 
-  private async getCustomerOrderCounts(
+  // One grouped query gives both figures the order list shows per customer:
+  // total orders, and delivery success rate. CANCELLED/LOST are left out of
+  // the rate on both sides, since those never had a real chance to be delivered,
+  // so counting them would understate an otherwise-reliable customer.
+  private async getCustomerStats(
     customerIds: string[],
-  ): Promise<Map<string, number>> {
+  ): Promise<Map<string, { successRate: number | null; orderCount: number }>> {
+    const stats = new Map<
+      string,
+      { successRate: number | null; orderCount: number }
+    >();
     const uniqueIds = [...new Set(customerIds)];
-    if (uniqueIds.length === 0) return new Map();
-
-    const grouped = await this.prisma.order.groupBy({
-      by: ['customerId'],
-      where: { customerId: { in: uniqueIds } },
-      _count: true,
-    });
-    return new Map(grouped.map((row) => [row.customerId, row._count]));
-  }
-
-  // Delivered orders as a share of that customer's own past orders, with
-  // CANCELLED/LOST excluded from both sides — those never had a real chance
-  // to be delivered, so counting them would understate an otherwise-reliable
-  // customer's rate. Scoped to only the customerIds actually on this page
-  // rather than the whole table, since this runs on every order-list fetch.
-  private async getCustomerSuccessRates(
-    customerIds: string[],
-  ): Promise<Map<string, number>> {
-    const uniqueIds = [...new Set(customerIds)];
-    if (uniqueIds.length === 0) return new Map();
+    if (uniqueIds.length === 0) return stats;
 
     const grouped = await this.prisma.order.groupBy({
       by: ['customerId', 'status'],
-      where: {
-        customerId: { in: uniqueIds },
-        status: { notIn: ['CANCELLED', 'LOST'] },
-      },
+      where: { customerId: { in: uniqueIds } },
       _count: true,
     });
 
-    const totals = new Map<string, { delivered: number; eligible: number }>();
+    const totals = new Map<
+      string,
+      { total: number; eligible: number; delivered: number }
+    >();
     for (const row of grouped) {
       const entry = totals.get(row.customerId) ?? {
-        delivered: 0,
+        total: 0,
         eligible: 0,
+        delivered: 0,
       };
-      entry.eligible += row._count;
-      if (row.status === 'DELIVERED') entry.delivered += row._count;
+      entry.total += row._count;
+      if (row.status !== 'CANCELLED' && row.status !== 'LOST') {
+        entry.eligible += row._count;
+        if (row.status === 'DELIVERED') entry.delivered += row._count;
+      }
       totals.set(row.customerId, entry);
     }
 
-    const rates = new Map<string, number>();
-    for (const [customerId, { delivered, eligible }] of totals) {
-      if (eligible > 0) {
-        rates.set(customerId, Math.round((delivered / eligible) * 100));
-      }
+    for (const [customerId, t] of totals) {
+      stats.set(customerId, {
+        successRate:
+          t.eligible > 0 ? Math.round((t.delivered / t.eligible) * 100) : null,
+        orderCount: t.total,
+      });
     }
-    return rates;
+    return stats;
+  }
+
+  // The latest change to each order (status, customer response, note or
+  // approval) and who made it. Orders with no logged change fall back to
+  // their own updatedAt in the caller.
+  private async getLastOrderActivity(orderIds: string[]) {
+    const last = new Map<string, { at: Date; by: string | null }>();
+    if (orderIds.length === 0) return last;
+
+    const [audits, statusChanges] = await Promise.all([
+      this.prisma.auditLog.findMany({
+        where: {
+          entityType: 'Order',
+          entityId: { in: orderIds },
+          action: {
+            in: [
+              'order.note',
+              'order.customer_response_change',
+              'order.web_approved',
+            ],
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+        distinct: ['entityId'],
+        select: {
+          entityId: true,
+          createdAt: true,
+          user: { select: { name: true } },
+        },
+      }),
+      this.prisma.orderStatusHistory.findMany({
+        where: { orderId: { in: orderIds } },
+        orderBy: { createdAt: 'desc' },
+        distinct: ['orderId'],
+        select: {
+          orderId: true,
+          createdAt: true,
+          changedBy: { select: { name: true } },
+        },
+      }),
+    ]);
+
+    const consider = (id: string, at: Date, by: string | null) => {
+      const current = last.get(id);
+      if (!current || at > current.at) last.set(id, { at, by });
+    };
+    for (const a of audits) consider(a.entityId, a.createdAt, a.user?.name ?? null);
+    for (const c of statusChanges)
+      consider(c.orderId, c.createdAt, c.changedBy?.name ?? null);
+    return last;
+  }
+
+  // Notes added from Order actions, grouped by order, oldest first.
+  private async getAdminNotes(orderIds: string[]) {
+    const notes = new Map<
+      string,
+      { id: string; note: string; createdAt: Date; user: { name: string } | null }[]
+    >();
+    if (orderIds.length === 0) return notes;
+
+    const logs = await this.prisma.auditLog.findMany({
+      where: {
+        action: 'order.note',
+        entityType: 'Order',
+        entityId: { in: orderIds },
+      },
+      orderBy: { createdAt: 'asc' },
+      select: {
+        id: true,
+        entityId: true,
+        createdAt: true,
+        after: true,
+        user: { select: { name: true } },
+      },
+    });
+    for (const log of logs) {
+      const note = (log.after as { note?: string } | null)?.note ?? '';
+      const list = notes.get(log.entityId) ?? [];
+      list.push({ id: log.id, note, createdAt: log.createdAt, user: log.user });
+      notes.set(log.entityId, list);
+    }
+    return notes;
+  }
+
+  // Which of the given orders carry each audit action, in one query.
+  private async getAuditFlags(
+    orderIds: string[],
+    actions: string[],
+  ): Promise<Map<string, Set<string>>> {
+    const flags = new Map<string, Set<string>>();
+    if (orderIds.length === 0) return flags;
+
+    const logs = await this.prisma.auditLog.findMany({
+      where: {
+        action: { in: actions },
+        entityType: 'Order',
+        entityId: { in: orderIds },
+      },
+      select: { entityId: true, action: true },
+      distinct: ['entityId', 'action'],
+    });
+    for (const log of logs) {
+      const set = flags.get(log.entityId) ?? new Set<string>();
+      set.add(log.action);
+      flags.set(log.entityId, set);
+    }
+    return flags;
   }
 
   async findOne(id: string, user: JwtPayload) {
     const order = await this.prisma.order.findUnique({
       where: { id },
+      relationLoadStrategy: 'join',
       include: {
         customer: true,
         channel: true,
@@ -493,8 +922,20 @@ export class OrdersService {
     // order simply by guessing/enumerating its id.
     await this.assertChannelAccess(user, order.channelId);
 
-    const timeline = await this.buildTimeline(order.id, order.statusHistory);
-    return { ...order, timeline };
+    const [timeline, auditFlags] = await Promise.all([
+      this.buildTimeline(order.id, order.statusHistory),
+      this.getAuditFlags(
+        [order.id],
+        ['order.web_approved', 'order.created_from_lead'],
+      ),
+    ]);
+    const flags = auditFlags.get(order.id);
+    return {
+      ...order,
+      timeline,
+      webApproved: flags?.has('order.web_approved') ?? false,
+      createdFromLead: flags?.has('order.created_from_lead') ?? false,
+    };
   }
 
   // Merges OrderStatusHistory (dedicated table) with CustomerResponse
@@ -736,6 +1177,40 @@ export class OrdersService {
           },
           include: { items: true },
         });
+
+        // Turning a lead into an order: the lead is removed here, so a second
+        // submit of the same lead fails and rolls this whole order back.
+        if (dto.checkoutLeadId) {
+          const lead = await tx.checkoutLead.findFirst({
+            where: { id: dto.checkoutLeadId, channelId: dto.channelId },
+            select: { customerResponse: true },
+          });
+          if (!lead) {
+            throw new ConflictException(
+              'This checkout is no longer incomplete',
+            );
+          }
+          await tx.checkoutLead.delete({ where: { id: dto.checkoutLeadId } });
+          if (lead.customerResponse) {
+            await tx.order.update({
+              where: { id: order.id },
+              data: { customerResponse: lead.customerResponse },
+            });
+          }
+          await tx.auditLog.updateMany({
+            where: { entityType: 'CheckoutLead', entityId: dto.checkoutLeadId },
+            data: { entityType: 'Order', entityId: order.id },
+          });
+          // Records where the order first came from: an Incomplete lead.
+          await tx.auditLog.create({
+            data: {
+              userId: actorUserId,
+              action: 'order.created_from_lead',
+              entityType: 'Order',
+              entityId: order.id,
+            },
+          });
+        }
 
         // Reserve stock per item, all-or-nothing within this transaction —
         // if any item is short, the throw below rolls back everything

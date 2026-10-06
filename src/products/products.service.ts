@@ -108,6 +108,7 @@ export class ProductsService {
   ) {
     const channelWhere = await this.channelWhereFilter(user, filters.channelId);
     return this.prisma.product.findMany({
+      relationLoadStrategy: 'join',
       where: {
         deletedAt: null,
         ...(filters.includeInactive ? {} : { isActive: true }),
