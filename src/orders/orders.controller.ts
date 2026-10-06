@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   Patch,
@@ -26,6 +27,7 @@ import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
 import { UpdateCustomerResponseDto } from './dto/update-customer-response.dto';
 import { RecordPaymentDto } from './dto/record-payment.dto';
 import { MarkPrintedDto } from './dto/mark-printed.dto';
+import { AddOrderNoteDto } from './dto/add-order-note.dto';
 
 @Controller('admin/orders')
 @UseGuards(JwtAuthGuard, PermissionsGuard)
@@ -64,6 +66,13 @@ export class OrdersController {
     );
   }
 
+  // Declared before ':id' so 'checkout-leads' is not read as an order id.
+  @Get('checkout-leads')
+  @RequirePermissions('orders.view')
+  listCheckoutLeads(@CurrentUser() user: JwtPayload) {
+    return this.ordersService.listCheckoutLeads(user);
+  }
+
   @Get(':id')
   @RequirePermissions('orders.view')
   findOne(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
@@ -88,6 +97,34 @@ export class OrdersController {
     @CurrentUser() user: JwtPayload,
   ) {
     return this.ordersService.updateOrder(id, dto, user.sub, user);
+  }
+
+  @Get(':id/notes')
+  @RequirePermissions('orders.view')
+  listNotes(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
+    return this.ordersService.listOrderNotes(id, user);
+  }
+
+  @Post(':id/notes')
+  @RequirePermissions('orders.update_status')
+  addNote(
+    @Param('id') id: string,
+    @Body() dto: AddOrderNoteDto,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.ordersService.addOrderNote(id, dto.note, user.sub, user);
+  }
+
+  @Delete('checkout-leads/:id')
+  @RequirePermissions('orders.create')
+  deleteCheckoutLead(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
+    return this.ordersService.deleteCheckoutLead(id, user);
+  }
+
+  @Post(':id/web-approve')
+  @RequirePermissions('orders.update_status')
+  approveWeb(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
+    return this.ordersService.approveWebOrder(id, user.sub, user);
   }
 
   @Post('print-log')

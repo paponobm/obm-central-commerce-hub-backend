@@ -180,8 +180,29 @@ model Channel {
   productChannels ProductChannel[]
   orders          Order[]
   users           UserChannel[]
+  checkoutLeads   CheckoutLead[]
 
   @@map("channels")
+}
+
+// A storefront checkout that is not complete yet: the customer has entered a
+// valid mobile number (and usually products) but not the name/address needed
+// to place the order. Shown as Incomplete on Web Orders. One row per
+// channel + phone; it is deleted when an order is placed with that phone.
+model CheckoutLead {
+  id        String   @id @default(cuid())
+  channelId String
+  phone     String
+  name      String?
+  address   String?
+  items     Json // [{ productId, quantity, unitPrice }] as last entered
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  channel Channel @relation(fields: [channelId], references: [id])
+
+  @@unique([channelId, phone])
+  @@map("checkout_leads")
 }
 
 // Which channels a user's access applies to — orthogonal to Role (which

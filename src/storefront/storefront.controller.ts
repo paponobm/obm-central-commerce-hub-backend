@@ -13,6 +13,7 @@ import { ChannelResolverGuard } from './guards/channel-resolver.guard';
 import { CurrentChannel } from './decorators/current-channel.decorator';
 import { StorefrontService } from './storefront.service';
 import { StorefrontCreateOrderDto } from './dto/storefront-create-order.dto';
+import { StorefrontCheckoutLeadDto } from './dto/storefront-checkout-lead.dto';
 
 // No JwtAuthGuard here — deliberately public. ChannelResolverGuard is the
 // only guard, and it's what keeps this whole surface channel-isolated
@@ -60,5 +61,16 @@ export class StorefrontController {
     @Body() dto: StorefrontCreateOrderDto,
   ) {
     return this.storefrontService.createOrder(channel, dto);
+  }
+
+  // Called as the customer types a valid mobile number, so it is debounced on
+  // the storefront; the limit is looser than order creation for that reason.
+  @Throttle({ default: { limit: 30, ttl: 60000 } })
+  @Post('checkout-leads')
+  saveCheckoutLead(
+    @CurrentChannel() channel: Channel,
+    @Body() dto: StorefrontCheckoutLeadDto,
+  ) {
+    return this.storefrontService.saveCheckoutLead(channel, dto);
   }
 }

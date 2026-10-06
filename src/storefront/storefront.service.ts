@@ -4,6 +4,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { OrdersService } from '../orders/orders.service';
 import { toNumber } from '../common/decimal.util';
 import { StorefrontCreateOrderDto } from './dto/storefront-create-order.dto';
+import { StorefrontCheckoutLeadDto } from './dto/storefront-checkout-lead.dto';
 
 const productChannelWithProduct =
   Prisma.validator<Prisma.ProductChannelDefaultArgs>()({
@@ -154,7 +155,7 @@ export class StorefrontService {
       }
     }
 
-    return this.ordersService.createOrder(
+    const order = await this.ordersService.createOrder(
       {
         source: 'WEBSITE',
         channelId: channel.id,
@@ -172,6 +173,65 @@ export class StorefrontService {
       },
       undefined,
     );
+
+    // The order is placed, so this phone's Incomplete lead is no longer needed.
+    await this.prisma.checkoutLead.deleteMany({
+      where: { channelId: channel.id, phone: dto.customerPhone },
+    });
+    return order;
+  }
+
+  // Keeps a checkout in progress as an Incomplete lead on Web Orders. Stores
+  // the price as the channel would charge it, so the admin total matches.
+  async saveCheckoutLead(channel: Channel, dto: StorefrontCheckoutLeadDto) {
+    const items: { productId: string; quantity: number; unitPrice: number }[] =
+      [];
+    for (const item of dto.items) {
+      const pc = await this.prisma.productChannel.findUnique({
+        where: {
+          productId_channelId: {
+            productId: item.productId,
+            channelId: channel.id,
+          },
+        },
+        include: { product: { select: { isActive: true, deletedAt: true } } },
+      });
+      if (
+        !pc ||
+        !pc.isPublished ||
+        !pc.product.isActive ||
+        pc.product.deletedAt
+      ) {
+        throw new NotFoundException(
+          `Product ${item.productId} is not available on this storefront`,
+        );
+      }
+      items.push({
+        productId: item.productId,
+        quantity: item.quantity,
+        unitPrice: toNumber(pc.price),
+      });
+    }
+
+    const lead = await this.prisma.checkoutLead.upsert({
+      where: {
+        channelId_phone: { channelId: channel.id, phone: dto.customerPhone },
+      },
+      create: {
+        channelId: channel.id,
+        phone: dto.customerPhone,
+        name: dto.customerName ?? null,
+        address: dto.shippingAddress ?? null,
+        items: items as Prisma.InputJsonValue,
+      },
+      update: {
+        name: dto.customerName ?? null,
+        address: dto.shippingAddress ?? null,
+        items: items as Prisma.InputJsonValue,
+      },
+      select: { id: true, updatedAt: true },
+    });
+    return { id: lead.id, updatedAt: lead.updatedAt };
   }
 
   private toPublicProduct(pc: ProductChannelWithProduct) {

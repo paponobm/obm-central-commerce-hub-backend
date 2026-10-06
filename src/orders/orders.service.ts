@@ -177,10 +177,19 @@ export class OrdersService {
     const successRateByCustomer =
       await this.getCustomerSuccessRates(customerIds);
     const orderCountByCustomer = await this.getCustomerOrderCounts(customerIds);
-    const printedIds = await this.getPrintedOrderIds(orders.map((o) => o.id));
+    const orderIds = orders.map((o) => o.id);
+    const printedIds = await this.getAuditedOrderIds(
+      'order.invoice_printed',
+      orderIds,
+    );
+    const webApprovedIds = await this.getAuditedOrderIds(
+      'order.web_approved',
+      orderIds,
+    );
     return orders.map((o) => ({
       ...o,
       invoicePrinted: printedIds.has(o.id),
+      webApproved: webApprovedIds.has(o.id),
       customer: {
         ...o.customer,
         successRate: successRateByCustomer.get(o.customerId) ?? null,
@@ -191,11 +200,14 @@ export class OrdersService {
 
   // Print history lives in the audit log rather than a column, so recording a
   // print needs no schema change. Only the set of printed ids is returned.
-  private async getPrintedOrderIds(orderIds: string[]): Promise<Set<string>> {
+  private async getAuditedOrderIds(
+    action: string,
+    orderIds: string[],
+  ): Promise<Set<string>> {
     if (orderIds.length === 0) return new Set();
     const logs = await this.prisma.auditLog.findMany({
       where: {
-        action: 'order.invoice_printed',
+        action,
         entityType: 'Order',
         entityId: { in: orderIds },
       },
@@ -203,6 +215,170 @@ export class OrdersService {
       distinct: ['entityId'],
     });
     return new Set(logs.map((l) => l.entityId));
+  }
+
+  // Approving a website order keeps it Pending, so it appears in the Order List's
+  // Pending tab; the approval itself is recorded in the audit log.
+  async approveWebOrder(
+    id: string,
+    actorUserId: string | undefined,
+    user: JwtPayload,
+  ) {
+    const order = await this.prisma.order.findUnique({
+      where: { id },
+      select: { id: true, status: true, channelId: true },
+    });
+    if (!order) {
+      throw new NotFoundException(`Order ${id} not found`);
+    }
+    await this.assertChannelAccess(user, order.channelId);
+    if (order.status !== 'PENDING') {
+      throw new BadRequestException(
+        `Only pending orders can be approved (status: ${order.status})`,
+      );
+    }
+    const already = await this.getAuditedOrderIds('order.web_approved', [id]);
+    if (already.has(id)) {
+      throw new BadRequestException('This order is already approved');
+    }
+    // Approval is when the order gets its real OBM number, so it appears in
+    // the Pending list with the regular sequence.
+    const orderNumber = await this.prisma.$transaction(async (tx) => {
+      const next = await this.generateOrderNumber(tx);
+      await tx.order.update({ where: { id }, data: { orderNumber: next } });
+      await tx.auditLog.create({
+        data: {
+          userId: actorUserId,
+          action: 'order.web_approved',
+          entityType: 'Order',
+          entityId: id,
+        },
+      });
+      return next;
+    });
+    return { id, webApproved: true, orderNumber };
+  }
+
+  // Free-text notes on an order. Stored as audit rows so no schema change is
+  // needed; the order's history shows who wrote each note and when.
+  async addOrderNote(
+    id: string,
+    note: string,
+    actorUserId: string | undefined,
+    user: JwtPayload,
+  ) {
+    const order = await this.prisma.order.findUnique({
+      where: { id },
+      select: { id: true, channelId: true },
+    });
+    if (!order) {
+      throw new NotFoundException(`Order ${id} not found`);
+    }
+    await this.assertChannelAccess(user, order.channelId);
+    return this.prisma.auditLog.create({
+      data: {
+        userId: actorUserId,
+        action: 'order.note',
+        entityType: 'Order',
+        entityId: id,
+        after: { note },
+      },
+      select: {
+        id: true,
+        createdAt: true,
+        after: true,
+        user: { select: { id: true, name: true } },
+      },
+    });
+  }
+
+  async listOrderNotes(id: string, user: JwtPayload) {
+    const order = await this.prisma.order.findUnique({
+      where: { id },
+      select: { channelId: true },
+    });
+    if (!order) {
+      throw new NotFoundException(`Order ${id} not found`);
+    }
+    await this.assertChannelAccess(user, order.channelId);
+    return this.prisma.auditLog.findMany({
+      where: { entityType: 'Order', entityId: id, action: 'order.note' },
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true,
+        createdAt: true,
+        after: true,
+        user: { select: { id: true, name: true } },
+      },
+    });
+  }
+
+  // Incomplete storefront checkouts (see StorefrontService.saveCheckoutLead),
+  // scoped to the user's stores like the order list.
+  async listCheckoutLeads(user: JwtPayload) {
+    const channelFilter = await this.channelScope.resolveDirectFilter(user);
+    const leads = await this.prisma.checkoutLead.findMany({
+      where: channelFilter,
+      orderBy: { updatedAt: 'desc' },
+      select: {
+        id: true,
+        channelId: true,
+        phone: true,
+        name: true,
+        address: true,
+        items: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    });
+    const storedItems = (lead: (typeof leads)[number]) =>
+      lead.items as unknown as {
+        productId: string;
+        quantity: number;
+        unitPrice: number;
+      }[];
+    const productIds = [
+      ...new Set(leads.flatMap((l) => storedItems(l).map((i) => i.productId))),
+    ];
+    const products = await this.prisma.product.findMany({
+      where: { id: { in: productIds } },
+      select: {
+        id: true,
+        name: true,
+        sku: true,
+        images: { orderBy: { sortOrder: 'asc' }, take: 1, select: { url: true } },
+      },
+    });
+    const productById = new Map(products.map((p) => [p.id, p]));
+    return leads.map((lead) => {
+      const items = storedItems(lead).map((i) => {
+        const product = productById.get(i.productId);
+        return {
+          productId: i.productId,
+          productName: product?.name ?? 'Unknown product',
+          sku: product?.sku ?? '',
+          image: product?.images[0]?.url ?? null,
+          quantity: i.quantity,
+          unitPrice: i.unitPrice,
+        };
+      });
+      const total = items.reduce((sum, i) => sum + i.quantity * i.unitPrice, 0);
+      return { ...lead, items, total };
+    });
+  }
+
+  // Removes an Incomplete lead, e.g. once it has been turned into an order.
+  async deleteCheckoutLead(id: string, user: JwtPayload) {
+    const lead = await this.prisma.checkoutLead.findUnique({
+      where: { id },
+      select: { id: true, channelId: true },
+    });
+    if (!lead) {
+      throw new NotFoundException(`Checkout lead ${id} not found`);
+    }
+    await this.assertChannelAccess(user, lead.channelId);
+    await this.prisma.checkoutLead.delete({ where: { id } });
+    return { id, deleted: true };
   }
 
   async markInvoicesPrinted(
@@ -520,7 +696,12 @@ export class OrdersService {
           );
         }
 
-        const orderNumber = await this.generateOrderNumber(tx);
+        // Web orders get a temporary WEB- number; the OBM number is assigned
+        // when the order is approved (see approveWebOrder).
+        const orderNumber =
+          dto.source === 'WEBSITE'
+            ? await this.generateWebOrderNumber(tx)
+            : await this.generateOrderNumber(tx);
 
         const order = await tx.order.create({
           data: {
@@ -1127,5 +1308,14 @@ export class OrdersService {
       SELECT nextval('order_number_seq') as nextval
     `;
     return `OBM-${result[0].nextval.toString()}`;
+  }
+
+  private async generateWebOrderNumber(
+    tx: Prisma.TransactionClient,
+  ): Promise<string> {
+    const result = await tx.$queryRaw<{ nextval: bigint }[]>`
+      SELECT nextval('web_order_number_seq') as nextval
+    `;
+    return `WEB-${result[0].nextval.toString()}`;
   }
 }

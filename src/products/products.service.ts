@@ -278,8 +278,13 @@ export class ProductsService {
       where: { productId_channelId: { productId, channelId } },
     });
 
+    // slugify strips non-ASCII, so Bengali names come out empty — fall back to
+    // a per-product suffix so two such products never share a slug in a channel.
     const slug =
-      dto.slug ?? existing?.slug ?? slugify(dto.name ?? product.name);
+      dto.slug?.trim() ||
+      existing?.slug ||
+      slugify(dto.name ?? product.name) ||
+      `product-${productId.slice(-8)}`;
     const price = dto.price ?? existing?.price ?? product.basePrice;
 
     return this.handleUniqueConstraints(() =>
