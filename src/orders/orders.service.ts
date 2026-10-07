@@ -27,6 +27,7 @@ import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
 import { UpdateCustomerResponseDto } from './dto/update-customer-response.dto';
 import { RecordPaymentDto } from './dto/record-payment.dto';
 import { UpdateCheckoutLeadDto } from './dto/update-checkout-lead.dto';
+import { CancelCheckoutLeadDto } from './dto/cancel-checkout-lead.dto';
 
 // The order lifecycle (ARCHITECTURE.md §7.2). Empty array = terminal state.
 // PENDING_CANCEL/PARTIAL/PENDING_RETURN/LOST/PREORDER are additive labels —
@@ -45,7 +46,10 @@ const TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
   PENDING_RETURN: ['RETURNED'],
   RETURNED: [],
   PENDING_CANCEL: ['PENDING', 'CANCELLED'],
-  CANCELLED: [],
+  // Reactivating a cancelled order (see reserveReservation below) re-reserves
+  // its stock in the same step, so it is never left "pending" with nothing
+  // held for it.
+  CANCELLED: ['PENDING'],
   PREORDER: ['PENDING', 'CANCELLED'],
   LOST: [],
 };
@@ -92,6 +96,8 @@ function describeLeadLog(action: string, after: unknown): string {
       return `Customer response changed to ${(data.customerResponse ?? 'none').replaceAll('_', ' ')}`;
     case 'checkout_lead.update':
       return data.items ? 'Products edited' : 'Details updated';
+    case 'checkout_lead.cancel':
+      return 'Checkout cancelled';
     default:
       return action;
   }
@@ -375,6 +381,7 @@ export class OrdersService {
         items: true,
         adminItems: true,
         customerResponse: true,
+        cancelledAt: true,
         createdAt: true,
         updatedAt: true,
       },
@@ -480,6 +487,7 @@ export class OrdersService {
         total,
         lastUpdate,
         adminNotes: notesByLead.get(lead.id) ?? [],
+        cancelled: lead.cancelledAt !== null,
       };
     });
   }
@@ -526,6 +534,7 @@ export class OrdersService {
           toStatus: true,
           createdAt: true,
           changedBy: { select: { name: true } },
+          note: true,
         },
       }),
     ]);
@@ -536,6 +545,10 @@ export class OrdersService {
         at: h.createdAt,
         by: h.changedBy?.name ?? null,
         text: `Order status changed to ${h.toStatus.replaceAll('_', ' ')}`,
+        // Lets the frontend give a cancellation its own highlighted card,
+        // with the reason/note recorded on the status change itself.
+        toStatus: h.toStatus,
+        note: h.note,
       })),
       ...logs.map((l) => ({
         key: `log-${l.id}`,
@@ -559,6 +572,7 @@ export class OrdersService {
             'order.note',
             'checkout_lead.response_change',
             'checkout_lead.update',
+            'checkout_lead.cancel',
           ],
         },
       },
@@ -571,12 +585,19 @@ export class OrdersService {
         user: { select: { name: true } },
       },
     });
-    return logs.map((l) => ({
-      key: `log-${l.id}`,
-      at: l.createdAt,
-      by: l.user?.name ?? null,
-      text: describeLeadLog(l.action, l.after),
-    }));
+    return logs.map((l) => {
+      const data = (l.after ?? {}) as { note?: string };
+      return {
+        key: `log-${l.id}`,
+        at: l.createdAt,
+        by: l.user?.name ?? null,
+        text: describeLeadLog(l.action, l.after),
+        // Lets the frontend give a cancellation the same highlighted card
+        // an order's cancellation gets.
+        toStatus: l.action === 'checkout_lead.cancel' ? 'CANCELLED' : undefined,
+        note: l.action === 'checkout_lead.cancel' ? data.note : undefined,
+      };
+    });
   }
 
   // Notes on an Incomplete lead. They move to the order if it is created
@@ -628,7 +649,9 @@ export class OrdersService {
     const [lead] = await this.prisma.$transaction([
       this.prisma.checkoutLead.update({
         where: { id: leadId },
-        data: { customerResponse: dto.customerResponse },
+        // Picking a response is working the lead again, so it leaves the
+        // Cancel tab — same as reactivating a cancelled order does.
+        data: { customerResponse: dto.customerResponse, cancelledAt: null },
         select: { id: true, customerResponse: true },
       }),
       this.prisma.auditLog.create({
@@ -638,6 +661,34 @@ export class OrdersService {
           entityType: 'CheckoutLead',
           entityId: leadId,
           after: { customerResponse: dto.customerResponse },
+        },
+      }),
+    ]);
+    return lead;
+  }
+
+  // Cancels an Incomplete checkout. The lead is kept (not deleted), so it
+  // stays visible, now in the Cancel tab.
+  async cancelCheckoutLead(
+    leadId: string,
+    dto: CancelCheckoutLeadDto,
+    actorUserId: string | undefined,
+    user: JwtPayload,
+  ) {
+    await this.assertCheckoutLeadAccess(leadId, user);
+    const [lead] = await this.prisma.$transaction([
+      this.prisma.checkoutLead.update({
+        where: { id: leadId },
+        data: { cancelledAt: new Date() },
+        select: { id: true, cancelledAt: true },
+      }),
+      this.prisma.auditLog.create({
+        data: {
+          userId: actorUserId,
+          action: 'checkout_lead.cancel',
+          entityType: 'CheckoutLead',
+          entityId: leadId,
+          after: { note: dto.note },
         },
       }),
     ]);
@@ -1573,6 +1624,12 @@ export class OrdersService {
       async (tx) => {
         if (dto.status === 'CANCELLED') {
           await this.releaseReservation(tx, order, actorUserId);
+        } else if (dto.status === 'PENDING' && order.status === 'CANCELLED') {
+          // Reactivating: nothing has been held for this order since it was
+          // cancelled, so it needs a fresh reservation, exactly like a new
+          // order — same availability check, so this still fails cleanly if
+          // the stock has since gone to someone else.
+          await this.reserveReservation(tx, order, actorUserId);
         } else if (dto.status === 'SHIPPED') {
           await this.deductOnShip(tx, order, actorUserId);
         } else if (dto.status === 'RETURNED') {
@@ -1664,6 +1721,43 @@ export class OrdersService {
       }),
     ]);
     return updated;
+  }
+
+  private async reserveReservation(
+    tx: Prisma.TransactionClient,
+    order: {
+      id: string;
+      orderNumber: string;
+      items: { productId: string; quantity: number; sku: string }[];
+    },
+    actorUserId?: string,
+  ) {
+    const movements: Prisma.StockMovementCreateManyInput[] = [];
+    for (const item of order.items) {
+      const rows = await tx.$queryRaw<StockRow[]>`
+        UPDATE inventory
+        SET "reservedStock" = "reservedStock" + ${item.quantity}, "updatedAt" = now()
+        WHERE "productId" = ${item.productId}
+          AND ("currentStock" - "reservedStock") >= ${item.quantity}
+        RETURNING "currentStock"
+      `;
+      if (rows.length === 0) {
+        throw new ConflictException(
+          `Insufficient stock to reactivate ${item.sku}`,
+        );
+      }
+      movements.push({
+        productId: item.productId,
+        type: 'RESERVE',
+        quantity: item.quantity,
+        balanceAfter: rows[0].currentStock,
+        referenceType: 'ORDER',
+        referenceId: order.id,
+        note: `Reserved — order ${order.orderNumber} reactivated`,
+        createdById: actorUserId,
+      });
+    }
+    await tx.stockMovement.createMany({ data: movements });
   }
 
   private async releaseReservation(

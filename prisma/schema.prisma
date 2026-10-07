@@ -205,6 +205,8 @@ model CheckoutLead {
   // Empty until set from Order actions; an empty response keeps the lead in Incomplete.
   // Carried to the order when it is created.
   customerResponse CustomerResponseStatus?
+  // Set when cancelled from Order actions; puts the lead in the Cancel tab.
+  cancelledAt DateTime?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

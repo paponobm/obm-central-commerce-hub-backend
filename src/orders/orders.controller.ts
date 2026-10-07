@@ -27,6 +27,7 @@ import { UpdateCustomerResponseDto } from './dto/update-customer-response.dto';
 import { RecordPaymentDto } from './dto/record-payment.dto';
 import { MarkPrintedDto } from './dto/mark-printed.dto';
 import { UpdateCheckoutLeadDto } from './dto/update-checkout-lead.dto';
+import { CancelCheckoutLeadDto } from './dto/cancel-checkout-lead.dto';
 import { AddOrderNoteDto } from './dto/add-order-note.dto';
 
 @Controller('admin/orders')
@@ -143,6 +144,16 @@ export class OrdersController {
     @CurrentUser() user: JwtPayload,
   ) {
     return this.ordersService.updateCheckoutLead(id, dto, user);
+  }
+
+  @Patch('checkout-leads/:id/cancel')
+  @RequirePermissions('orders.update_status')
+  cancelCheckoutLead(
+    @Param('id') id: string,
+    @Body() dto: CancelCheckoutLeadDto,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.ordersService.cancelCheckoutLead(id, dto, user.sub, user);
   }
 
   @Patch('checkout-leads/:id/customer-response')
