@@ -414,7 +414,9 @@ model Order {
   status           OrderStatus            @default(PENDING)
   paymentStatus    PaymentStatus          @default(UNPAID)
   shipmentStatus   ShipmentStatus         @default(NOT_SHIPPED)
-  customerResponse CustomerResponseStatus @default(NO_RESPONSE)
+  // Empty until someone sets it from Web Orders; an empty response means the
+  // order is waiting in Processing.
+  customerResponse CustomerResponseStatus?
 
   subtotal    Decimal @db.Decimal(12, 2)
   discount    Decimal @default(0) @db.Decimal(12, 2)
@@ -433,6 +435,9 @@ model Order {
   deliveryMethod  String?
 
   createdById String? // staff user for MANUAL/PHONE/etc orders; null for WEBSITE
+  // Set when a website order is approved from Web Orders; until then it is
+  // kept out of the Order List.
+  webApprovedAt DateTime?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 

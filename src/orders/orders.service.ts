@@ -117,6 +117,8 @@ export class OrdersService {
       from?: string;
       to?: string;
       search?: string;
+      // The Web Orders page asks for these; the Order List does not.
+      includeWebUnapproved?: boolean;
     },
     user: JwtPayload,
   ) {
@@ -127,6 +129,10 @@ export class OrdersService {
     const orders = await this.prisma.order.findMany({
       where: {
         ...channelFilter,
+        // A website order stays in Web Orders until it is approved.
+        ...(filters.includeWebUnapproved
+          ? {}
+          : { NOT: { source: 'WEBSITE', status: 'PENDING', webApprovedAt: null } }),
         ...(filters.status ? { status: filters.status } : {}),
         ...(filters.source ? { source: filters.source } : {}),
         ...(filters.paymentStatus
@@ -282,7 +288,10 @@ export class OrdersService {
     // the Pending list with the regular sequence.
     const orderNumber = await this.prisma.$transaction(async (tx) => {
       const next = await this.generateOrderNumber(tx);
-      await tx.order.update({ where: { id }, data: { orderNumber: next } });
+      await tx.order.update({
+        where: { id },
+        data: { orderNumber: next, webApprovedAt: new Date() },
+      });
       await tx.auditLog.create({
         data: {
           userId: actorUserId,

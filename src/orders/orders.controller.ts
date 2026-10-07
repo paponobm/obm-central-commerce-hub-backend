@@ -48,6 +48,7 @@ export class OrdersController {
     @Query('from') from?: string,
     @Query('to') to?: string,
     @Query('search') search?: string,
+    @Query('includeWebUnapproved') includeWebUnapproved?: string,
   ) {
     return this.ordersService.findAll(
       {
@@ -61,6 +62,7 @@ export class OrdersController {
         from,
         to,
         search,
+        includeWebUnapproved: includeWebUnapproved === 'true',
       },
       user,
     );
