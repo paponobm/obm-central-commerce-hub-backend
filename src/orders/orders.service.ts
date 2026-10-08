@@ -26,6 +26,7 @@ import { UpdateOrderDto } from './dto/update-order.dto';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
 import { UpdateCustomerResponseDto } from './dto/update-customer-response.dto';
 import { RecordPaymentDto } from './dto/record-payment.dto';
+import { UpdatePaymentDto } from './dto/update-payment.dto';
 import { UpdateCheckoutLeadDto } from './dto/update-checkout-lead.dto';
 import { CancelCheckoutLeadDto } from './dto/cancel-checkout-lead.dto';
 
@@ -1507,6 +1508,7 @@ export class OrdersService {
             shippingPhone: dto.customerPhone ?? order.shippingPhone,
             shippingAddress: dto.shippingAddress ?? order.shippingAddress,
             deliveryMethod: dto.deliveryMethod ?? order.deliveryMethod,
+            source: dto.source ?? order.source,
             notes: dto.notes ?? order.notes,
             subtotal,
             discount: orderDiscount,
@@ -1589,6 +1591,65 @@ export class OrdersService {
       }),
       this.prisma.order.update({
         where: { id },
+        data: { paymentStatus },
+        include: { items: true, customer: true, channel: true, payments: true },
+      }),
+    ]);
+
+    return updatedOrder;
+  }
+
+  async updatePayment(
+    orderId: string,
+    paymentId: string,
+    dto: UpdatePaymentDto,
+    actorUserId: string | undefined,
+    user: JwtPayload,
+  ) {
+    const order = await this.prisma.order.findUnique({
+      where: { id: orderId },
+      include: { payments: true },
+    });
+    if (!order) {
+      throw new NotFoundException(`Order ${orderId} not found`);
+    }
+    await this.assertChannelAccess(user, order.channelId);
+
+    const payment = order.payments.find((p) => p.id === paymentId);
+    if (!payment) {
+      throw new NotFoundException(`Payment ${paymentId} not found on this order`);
+    }
+
+    if (order.status === 'CANCELLED') {
+      throw new BadRequestException(
+        'Cannot edit a payment on a cancelled order',
+      );
+    }
+
+    const total = toNumber(order.total);
+    // Re-derive paymentStatus against every OTHER payment plus this one's
+    // new amount, same re-derivation recordPayment does for a fresh payment.
+    const otherPaid = order.payments
+      .filter((p) => p.id !== paymentId && p.status !== 'REFUNDED')
+      .reduce((sum, p) => sum + toNumber(p.amount), 0);
+    const newAmount = dto.amount ?? toNumber(payment.amount);
+    const newPaidTotal = otherPaid + newAmount;
+    const paymentStatus: PaymentStatus =
+      newPaidTotal <= 0 ? 'UNPAID' : newPaidTotal >= total ? 'PAID' : 'PARTIAL';
+
+    const [, updatedOrder] = await this.prisma.$transaction([
+      this.prisma.payment.update({
+        where: { id: paymentId },
+        data: {
+          amount: dto.amount,
+          method: dto.method,
+          transactionId:
+            dto.transactionId !== undefined ? dto.transactionId || null : undefined,
+          status: paymentStatus === 'PAID' ? 'PAID' : 'PARTIAL',
+        },
+      }),
+      this.prisma.order.update({
+        where: { id: orderId },
         data: { paymentStatus },
         include: { items: true, customer: true, channel: true, payments: true },
       }),
