@@ -38,28 +38,31 @@ import { CancelCheckoutLeadDto } from './dto/cancel-checkout-lead.dto';
 // already deducted stock), and PREORDER reserves stock exactly like PENDING.
 const TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
   PENDING: ['CONFIRMED', 'PREORDER', 'PENDING_CANCEL', 'CANCELLED'],
-  CONFIRMED: ['PROCESSING', 'PENDING_CANCEL', 'CANCELLED'],
-  PROCESSING: ['READY_TO_SHIP', 'PENDING_CANCEL', 'CANCELLED'],
-  READY_TO_SHIP: ['SHIPPED', 'PENDING_CANCEL', 'CANCELLED'],
+  // Each of these can only step back to its own immediate predecessor, not
+  // jump multiple stages at once — same one-step-at-a-time rule as moving
+  // forward. Safe either direction since stock only ever moves on SHIPPED
+  // (see deductOnShip).
+  CONFIRMED: ['PROCESSING', 'PENDING', 'PENDING_CANCEL', 'CANCELLED'],
+  PROCESSING: ['READY_TO_SHIP', 'CONFIRMED', 'PENDING_CANCEL', 'CANCELLED'],
+  READY_TO_SHIP: ['SHIPPED', 'PROCESSING', 'PENDING_CANCEL', 'CANCELLED'],
   SHIPPED: ['DELIVERED', 'PARTIAL', 'PENDING_RETURN', 'LOST'],
   PARTIAL: ['DELIVERED', 'PENDING_RETURN', 'RETURNED'],
   DELIVERED: ['PENDING_RETURN', 'RETURNED'],
   PENDING_RETURN: ['RETURNED'],
   RETURNED: [],
   PENDING_CANCEL: ['PENDING', 'CANCELLED'],
-  // Reactivating a cancelled order (see reserveReservation below) re-reserves
-  // its stock in the same step, so it is never left "pending" with nothing
-  // held for it.
+  // Reactivating a cancelled order back to PENDING has no stock effect —
+  // nothing was ever reserved for it to begin with (see deductOnShip).
   CANCELLED: ['PENDING'],
   PREORDER: ['PENDING', 'CANCELLED'],
   LOST: [],
 };
 
 // Content editing (items/customer/discount/etc, via updateOrder) is only
-// safe while stock is merely *reserved* — the same set the frontend uses
-// to decide when the row-level Cancel action is offered. Once SHIPPED,
-// stock has actually been deducted, so changing items would silently
-// desync the reservation/deduction accounting.
+// offered pre-ship — the same set the frontend uses to decide when the
+// row-level Cancel action is offered. Once SHIPPED, stock has actually been
+// deducted against this exact item list, so changing items afterward would
+// silently desync the deduction from what was really shipped.
 const EDITABLE_STATUSES = new Set<OrderStatus>([
   'PENDING',
   'CONFIRMED',
@@ -1273,42 +1276,10 @@ export class OrdersService {
           });
         }
 
-        // Reserve stock per item, all-or-nothing within this transaction —
-        // if any item is short, the throw below rolls back everything
-        // already written above (including the Order/OrderItem rows). Each
-        // item still needs its own atomic conditional UPDATE (that's the
-        // actual safety mechanism), but the resulting StockMovement rows are
-        // batched into one createMany below rather than N separate round
-        // trips — every extra sequential query here is real network latency
-        // against a remote database, and this transaction has a wall-clock
-        // budget (see the timeout passed to runTransaction below).
-        const movements: Prisma.StockMovementCreateManyInput[] = [];
-        for (const item of order.items) {
-          const rows = await tx.$queryRaw<StockRow[]>`
-          UPDATE inventory
-          SET "reservedStock" = "reservedStock" + ${item.quantity}, "updatedAt" = now()
-          WHERE "productId" = ${item.productId}
-            AND ("currentStock" - "reservedStock") >= ${item.quantity}
-          RETURNING "currentStock"
-        `;
-          if (rows.length === 0) {
-            throw new ConflictException(
-              `Insufficient stock for ${item.sku} (${item.productName})`,
-            );
-          }
-          movements.push({
-            productId: item.productId,
-            type: 'RESERVE',
-            quantity: item.quantity,
-            balanceAfter: rows[0].currentStock,
-            referenceType: 'ORDER',
-            referenceId: order.id,
-            note: `Reserved for order ${order.orderNumber}`,
-            createdById: actorUserId,
-          });
-        }
-        await tx.stockMovement.createMany({ data: movements });
-
+        // Stock is deliberately untouched here — placing an order doesn't
+        // move inventory at all. It's only counted as leaving the warehouse
+        // when the order actually ships (see deductOnShip), since that's
+        // when physical stock really changes hands.
         let payment = null;
         if (advanceAmount > 0) {
           payment = await tx.payment.create({
@@ -1453,12 +1424,8 @@ export class OrdersService {
           customerId = customer.id;
         }
 
-        // Release the OLD reservation, then re-reserve for the NEW item set
-        // — both inside this one transaction, so a failed re-reservation
-        // rolls back the release too (never left holding neither the old
-        // nor the new stock).
-        await this.releaseReservation(tx, order, actorUserId);
-
+        // Stock is untouched here too, same as createOrder — editing an
+        // order's items has no inventory effect until it actually ships.
         await tx.orderItem.deleteMany({ where: { orderId: id } });
         await tx.orderItem.createMany({
           data: lineItems.map((li) => ({
@@ -1472,33 +1439,6 @@ export class OrdersService {
             total: li.total,
           })),
         });
-
-        const movements: Prisma.StockMovementCreateManyInput[] = [];
-        for (const li of lineItems) {
-          const rows = await tx.$queryRaw<StockRow[]>`
-            UPDATE inventory
-            SET "reservedStock" = "reservedStock" + ${li.quantity}, "updatedAt" = now()
-            WHERE "productId" = ${li.productId}
-              AND ("currentStock" - "reservedStock") >= ${li.quantity}
-            RETURNING "currentStock"
-          `;
-          if (rows.length === 0) {
-            throw new ConflictException(
-              `Insufficient stock for ${li.sku} (${li.productName})`,
-            );
-          }
-          movements.push({
-            productId: li.productId,
-            type: 'RESERVE',
-            quantity: li.quantity,
-            balanceAfter: rows[0].currentStock,
-            referenceType: 'ORDER',
-            referenceId: id,
-            note: `Reserved for order ${order.orderNumber} (edited)`,
-            createdById: actorUserId,
-          });
-        }
-        await tx.stockMovement.createMany({ data: movements });
 
         const updated = await tx.order.update({
           where: { id },
@@ -1683,15 +1623,10 @@ export class OrdersService {
     return runTransaction(
       this.prisma,
       async (tx) => {
-        if (dto.status === 'CANCELLED') {
-          await this.releaseReservation(tx, order, actorUserId);
-        } else if (dto.status === 'PENDING' && order.status === 'CANCELLED') {
-          // Reactivating: nothing has been held for this order since it was
-          // cancelled, so it needs a fresh reservation, exactly like a new
-          // order — same availability check, so this still fails cleanly if
-          // the stock has since gone to someone else.
-          await this.reserveReservation(tx, order, actorUserId);
-        } else if (dto.status === 'SHIPPED') {
+        // CANCELLED and reactivating back to PENDING have nothing to do to
+        // stock — nothing was ever reserved for this order to release or
+        // re-reserve (see deductOnShip: stock only moves on SHIPPED/RETURNED).
+        if (dto.status === 'SHIPPED') {
           await this.deductOnShip(tx, order, actorUserId);
         } else if (dto.status === 'RETURNED') {
           await this.restockOnReturn(
@@ -1784,79 +1719,6 @@ export class OrdersService {
     return updated;
   }
 
-  private async reserveReservation(
-    tx: Prisma.TransactionClient,
-    order: {
-      id: string;
-      orderNumber: string;
-      items: { productId: string; quantity: number; sku: string }[];
-    },
-    actorUserId?: string,
-  ) {
-    const movements: Prisma.StockMovementCreateManyInput[] = [];
-    for (const item of order.items) {
-      const rows = await tx.$queryRaw<StockRow[]>`
-        UPDATE inventory
-        SET "reservedStock" = "reservedStock" + ${item.quantity}, "updatedAt" = now()
-        WHERE "productId" = ${item.productId}
-          AND ("currentStock" - "reservedStock") >= ${item.quantity}
-        RETURNING "currentStock"
-      `;
-      if (rows.length === 0) {
-        throw new ConflictException(
-          `Insufficient stock to reactivate ${item.sku}`,
-        );
-      }
-      movements.push({
-        productId: item.productId,
-        type: 'RESERVE',
-        quantity: item.quantity,
-        balanceAfter: rows[0].currentStock,
-        referenceType: 'ORDER',
-        referenceId: order.id,
-        note: `Reserved — order ${order.orderNumber} reactivated`,
-        createdById: actorUserId,
-      });
-    }
-    await tx.stockMovement.createMany({ data: movements });
-  }
-
-  private async releaseReservation(
-    tx: Prisma.TransactionClient,
-    order: {
-      id: string;
-      orderNumber: string;
-      items: { productId: string; quantity: number; sku: string }[];
-    },
-    actorUserId?: string,
-  ) {
-    const movements: Prisma.StockMovementCreateManyInput[] = [];
-    for (const item of order.items) {
-      const rows = await tx.$queryRaw<StockRow[]>`
-        UPDATE inventory
-        SET "reservedStock" = "reservedStock" - ${item.quantity}, "updatedAt" = now()
-        WHERE "productId" = ${item.productId} AND "reservedStock" >= ${item.quantity}
-        RETURNING "currentStock"
-      `;
-      if (rows.length === 0) {
-        throw new ConflictException(
-          `Reservation inconsistency releasing stock for ${item.sku}`,
-        );
-      }
-      movements.push({
-        productId: item.productId,
-        type: 'RELEASE',
-        quantity: -item.quantity,
-        balanceAfter: rows[0].currentStock,
-        referenceType: 'ORDER',
-        referenceId: order.id,
-        note: `Released — order ${order.orderNumber} cancelled`,
-        createdById: actorUserId,
-      });
-    }
-    await tx.stockMovement.createMany({ data: movements });
-  }
-
   private async deductOnShip(
     tx: Prisma.TransactionClient,
     order: {
@@ -1871,21 +1733,21 @@ export class OrdersService {
     },
     actorUserId?: string,
   ) {
+    // The sole point where an order ever moves stock: nothing was reserved
+    // at order-creation time, so this only has to check against — and
+    // deduct from — currentStock itself (no reservedStock bookkeeping).
     const movements: Prisma.StockMovementCreateManyInput[] = [];
     for (const item of order.items) {
       const rows = await tx.$queryRaw<StockRow[]>`
         UPDATE inventory
-        SET "currentStock" = "currentStock" - ${item.quantity},
-            "reservedStock" = "reservedStock" - ${item.quantity},
-            "updatedAt" = now()
+        SET "currentStock" = "currentStock" - ${item.quantity}, "updatedAt" = now()
         WHERE "productId" = ${item.productId}
           AND "currentStock" >= ${item.quantity}
-          AND "reservedStock" >= ${item.quantity}
         RETURNING "currentStock"
       `;
       if (rows.length === 0) {
         throw new ConflictException(
-          `Cannot ship — insufficient stock/reservation for ${item.sku} (${item.productName})`,
+          `Cannot ship — insufficient stock for ${item.sku} (${item.productName})`,
         );
       }
       movements.push({

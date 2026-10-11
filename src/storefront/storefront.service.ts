@@ -34,13 +34,11 @@ export class StorefrontService {
   ) {}
 
   // Categories are a shared, global taxonomy in this schema (not
-  // channel-scoped) — every storefront sees the same category tree. Simple
-  // and correct for now; scoping to "only categories with a published
-  // product on this channel" is a reasonable future refinement, not needed
-  // to launch.
+  // channel-scoped) — every storefront sees the same category tree, filtered
+  // to published ones via the admin's publish toggle.
   async getCategories() {
     return this.prisma.category.findMany({
-      where: { deletedAt: null },
+      where: { deletedAt: null, isPublished: true },
       select: { id: true, name: true, slug: true, parentId: true },
       orderBy: { name: 'asc' },
     });

@@ -1,4 +1,5 @@
 import {
+  IsBoolean,
   IsOptional,
   IsString,
   Matches,
@@ -25,4 +26,8 @@ export class CreateCategoryDto {
   @IsOptional()
   @IsString()
   imageUrl?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  isPublished?: boolean;
 }
