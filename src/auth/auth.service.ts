@@ -6,7 +6,7 @@ import { UsersService, UserWithPermissions } from '../users/users.service';
 import { JwtPayload } from './types/jwt-payload.type';
 
 const ACCESS_TOKEN_TTL = '15m';
-const REFRESH_TOKEN_TTL = '7d';
+const REFRESH_TOKEN_TTL = '30d';
 
 @Injectable()
 export class AuthService {
