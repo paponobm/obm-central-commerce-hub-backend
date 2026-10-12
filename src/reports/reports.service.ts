@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { ForbiddenException, Injectable } from '@nestjs/common';
 import { OrderStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { InventoryService } from '../inventory/inventory.service';
@@ -115,6 +115,20 @@ export class ReportsService {
   // moving to a materialized view refreshed on a schedule rather than
   // computed live on every dashboard load — not needed at current volume.
   async getDashboard(user: JwtPayload, channelId?: string) {
+    // The broad dashboard.view check on the controller only says "granted
+    // somewhere" — this is the one that actually matters: is it granted
+    // for the store the request is scoped to right now (or "All Stores"
+    // if none was requested)? A user can have it on for one and off for
+    // the other.
+    const allowedForScope = await this.channelScope.hasPermissionForScope(
+      user,
+      'dashboard.view',
+      channelId,
+    );
+    if (!allowedForScope) {
+      throw new ForbiddenException('Dashboard is not granted for this store');
+    }
+
     const [orderWhere, channelSql] = await Promise.all([
       this.orderWhereFilter(user, channelId),
       this.orderChannelSqlFragment(user, channelId),

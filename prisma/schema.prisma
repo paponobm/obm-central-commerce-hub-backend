@@ -128,6 +128,8 @@ model User {
   auditLogs          AuditLog[]
   purchases          Purchase[]
   channels           UserChannel[]
+  permissions        UserPermission[]
+  channelPermissions UserChannelPermission[]
 
   @@index([roleId])
   @@map("users")
@@ -150,6 +152,8 @@ model Permission {
   key   String           @unique // e.g. "orders.create", "products.publish"
   label String
   roles RolePermission[]
+  users UserPermission[]
+  userChannels UserChannelPermission[]
 
   @@map("permissions")
 }
@@ -163,6 +167,42 @@ model RolePermission {
 
   @@id([roleId, permissionId])
   @@map("role_permissions")
+}
+
+// Per-user permission grants for every role except Super Admin (which is
+// always every permission, enforced in code — see AuthService). Admin,
+// Manager and Member all get their own individually toggled set here
+// instead of sharing one fixed role-wide list, so two users with the same
+// role can have different access. This table specifically holds the
+// "All Stores" scope's grants — what the user can do when no specific
+// store is active. UserChannelPermission below holds the per-store
+// counterpart; the two are deliberately separate sets, not one list
+// filtered by scope, so a permission can be on for "All Stores" and off
+// for a specific store (or vice versa) at the same time.
+model UserPermission {
+  userId       String
+  permissionId String
+
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([userId, permissionId])
+  @@map("user_permissions")
+}
+
+// A user's permission grants scoped to one specific store — independent of
+// their "All Stores" grants (UserPermission) and of any other store's.
+model UserChannelPermission {
+  userId       String
+  channelId    String
+  permissionId String
+
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  channel    Channel    @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([userId, channelId, permissionId])
+  @@map("user_channel_permissions")
 }
 
 // =====================================================================
@@ -184,6 +224,7 @@ model Channel {
   productChannels ProductChannel[]
   orders          Order[]
   users           UserChannel[]
+  userPermissions UserChannelPermission[]
   checkoutLeads   CheckoutLead[]
 
   @@map("channels")

@@ -1,6 +1,7 @@
 import { ForbiddenException, Injectable } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { JwtPayload } from '../../auth/types/jwt-payload.type';
+import { ROLE_SUPER_ADMIN } from '../../users/role-hierarchy';
 
 export const ALL_ACCESS_PERMISSION = 'channels.all_access';
 
@@ -59,5 +60,34 @@ export class ChannelScopeService {
     // emitting invalid SQL) — correct fail-closed behavior for a user with
     // no channel assignments at all, no special-casing needed by callers.
     return { channelId: { in: allowed } };
+  }
+
+  // Whether `permissionKey` is granted for the SCOPE the request is
+  // actually operating under — "All Stores" (no channelId requested) or
+  // one specific store. This is independent of the broad JWT permission
+  // list (which only says "granted somewhere"): a user can hold
+  // dashboard.view for "All Stores" and not for a specific store, or vice
+  // versa — see UserPermission/UserChannelPermission in the schema. Super
+  // Admin always passes, same as everywhere else.
+  async hasPermissionForScope(
+    user: JwtPayload,
+    permissionKey: string,
+    requestedChannelId?: string,
+  ): Promise<boolean> {
+    if (user.roleName === ROLE_SUPER_ADMIN) return true;
+    if (requestedChannelId) {
+      const row = await this.prisma.userChannelPermission.findFirst({
+        where: {
+          userId: user.sub,
+          channelId: requestedChannelId,
+          permission: { key: permissionKey },
+        },
+      });
+      return !!row;
+    }
+    const row = await this.prisma.userPermission.findFirst({
+      where: { userId: user.sub, permission: { key: permissionKey } },
+    });
+    return !!row;
   }
 }

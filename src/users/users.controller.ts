@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   NotFoundException,
   Param,
@@ -46,17 +47,42 @@ export class UsersController {
     return this.usersService.findAll();
   }
 
+  // The full permission catalog, for the per-user permission checklist on
+  // the create/edit user form.
+  @Get('permissions-catalog')
+  @UseGuards(JwtAuthGuard, PermissionsGuard)
+  @RequirePermissions('users.manage')
+  permissionsCatalog() {
+    return this.usersService.permissionsCatalog();
+  }
+
   @Post()
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @RequirePermissions('users.manage')
-  create(@Body() dto: CreateUserDto) {
-    return this.usersService.create(dto);
+  create(@Body() dto: CreateUserDto, @CurrentUser() currentUser: JwtPayload) {
+    return this.usersService.create(dto, currentUser.roleName);
   }
 
   @Patch(':id')
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @RequirePermissions('users.manage')
-  update(@Param('id') id: string, @Body() dto: UpdateUserDto) {
-    return this.usersService.update(id, dto);
+  update(
+    @Param('id') id: string,
+    @Body() dto: UpdateUserDto,
+    @CurrentUser() currentUser: JwtPayload,
+  ) {
+    return this.usersService.update(
+      id,
+      dto,
+      currentUser.sub,
+      currentUser.roleName,
+    );
+  }
+
+  @Delete(':id')
+  @UseGuards(JwtAuthGuard, PermissionsGuard)
+  @RequirePermissions('users.manage')
+  remove(@Param('id') id: string, @CurrentUser() currentUser: JwtPayload) {
+    return this.usersService.remove(id, currentUser.sub, currentUser.roleName);
   }
 }

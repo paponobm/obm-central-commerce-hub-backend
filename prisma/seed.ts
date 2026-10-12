@@ -10,7 +10,8 @@ const PERMISSIONS: { key: string; label: string }[] = [
   { key: 'channels.manage', label: 'Create/edit storefronts' },
   {
     key: 'channels.all_access',
-    label: 'Unrestricted access to every store (ignores per-user channel assignment)',
+    label:
+      'Unrestricted access to every store (ignores per-user channel assignment)',
   },
   { key: 'products.view', label: 'View products' },
   { key: 'products.manage', label: 'Create/edit products' },
@@ -27,56 +28,25 @@ const PERMISSIONS: { key: string; label: string }[] = [
   { key: 'shipments.view', label: 'View shipments' },
   { key: 'shipments.manage', label: 'Update shipments' },
   { key: 'suppliers.manage', label: 'Manage suppliers & purchases' },
-  { key: 'reports.view', label: 'View reports & dashboard' },
+  { key: 'reports.view', label: 'View reports' },
+  // Independent of reports.view on purpose — a user can have one without
+  // the other (e.g. Dashboard summary access without the deeper sales
+  // analytics on the Reports page, or vice versa).
+  { key: 'dashboard.view', label: 'View dashboard' },
   { key: 'users.manage', label: 'Manage staff users & roles' },
 ];
 
+// Only Super Admin has a fixed, role-wide permission set ('*' — every
+// permission, every store, not editable). Admin, Manager and Member each
+// get their own individually-toggled permissions on the UserPermission
+// table instead (see UsersService) — their role-level set here is
+// deliberately empty so reseeding never resurrects a shared fixed list for
+// them or clobbers what's actually been granted per user.
 const ROLE_PERMISSIONS: Record<string, string[] | '*'> = {
-  Owner: '*',
-  Manager: [
-    'channels.view',
-    'products.view',
-    'products.manage',
-    'products.publish',
-    'inventory.view',
-    'inventory.adjust',
-    'orders.view',
-    'orders.create',
-    'orders.update_status',
-    'customers.view',
-    'customers.manage',
-    'payments.view',
-    'payments.manage',
-    'shipments.view',
-    'shipments.manage',
-    'suppliers.manage',
-    'reports.view',
-  ],
-  Staff: [
-    'products.view',
-    'inventory.view',
-    'orders.view',
-    'orders.create',
-    'orders.update_status',
-    'customers.view',
-    'customers.manage',
-    'payments.view',
-    'shipments.view',
-  ],
-  // Read-only across the board — every `.view` permission, none of the
-  // `.manage`/`.create`/`.update_status`/`.adjust`/`.publish` ones.
-  // Deliberately does NOT include channels.all_access, so a Viewer is still
-  // scoped to whichever stores they're assigned via UserChannel.
-  Viewer: [
-    'channels.view',
-    'products.view',
-    'inventory.view',
-    'orders.view',
-    'customers.view',
-    'payments.view',
-    'shipments.view',
-    'reports.view',
-  ],
+  'Super Admin': '*',
+  Admin: [],
+  Manager: [],
+  Member: [],
 };
 
 const DEFAULT_ADMIN = {
@@ -109,9 +79,7 @@ async function main() {
     });
 
     const keys =
-      permissionKeys === '*'
-        ? PERMISSIONS.map((p) => p.key)
-        : permissionKeys;
+      permissionKeys === '*' ? PERMISSIONS.map((p) => p.key) : permissionKeys;
 
     const permissions = await prisma.permission.findMany({
       where: { key: { in: keys } },
@@ -134,9 +102,9 @@ async function main() {
     create: DEFAULT_CHANNEL,
   });
 
-  console.log('Seeding owner admin user...');
-  const ownerRole = await prisma.role.findUniqueOrThrow({
-    where: { name: 'Owner' },
+  console.log('Seeding super admin user...');
+  const superAdminRole = await prisma.role.findUniqueOrThrow({
+    where: { name: 'Super Admin' },
   });
   const passwordHash = await bcrypt.hash(DEFAULT_ADMIN.password, 10);
   await prisma.user.upsert({
@@ -146,13 +114,15 @@ async function main() {
       name: DEFAULT_ADMIN.name,
       email: DEFAULT_ADMIN.email,
       passwordHash,
-      roleId: ownerRole.id,
+      roleId: superAdminRole.id,
     },
   });
 
   console.log('\nSeed complete.');
-  console.log(`  Owner login: ${DEFAULT_ADMIN.email}`);
-  console.log(`  Owner password: ${DEFAULT_ADMIN.password} (change after first login)`);
+  console.log(`  Super Admin login: ${DEFAULT_ADMIN.email}`);
+  console.log(
+    `  Super Admin password: ${DEFAULT_ADMIN.password} (change after first login)`,
+  );
   console.log(`  Channel: ${DEFAULT_CHANNEL.name} (${DEFAULT_CHANNEL.slug})`);
 }
 

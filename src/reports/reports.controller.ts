@@ -25,7 +25,10 @@ const SORT_OPTIONS: TopProductsSortBy[] = ['quantity', 'revenue'];
 export class ReportsController {
   constructor(private readonly reportsService: ReportsService) {}
 
+  // Overrides the class-level reports.view — Dashboard and Reports are
+  // independently grantable, not a shared toggle.
   @Get('dashboard')
+  @RequirePermissions('dashboard.view')
   getDashboard(
     @CurrentUser() user: JwtPayload,
     @Query('channelId') channelId?: string,

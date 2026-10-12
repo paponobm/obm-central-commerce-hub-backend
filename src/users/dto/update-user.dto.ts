@@ -1,11 +1,12 @@
 import {
-  IsArray,
   IsBoolean,
   IsEmail,
+  IsObject,
   IsOptional,
   IsString,
   MinLength,
 } from 'class-validator';
+import { PermissionsByScopeDto } from './create-user.dto';
 
 export class UpdateUserDto {
   @IsOptional()
@@ -26,12 +27,15 @@ export class UpdateUserDto {
   @IsString()
   roleId?: string;
 
-  // When provided, REPLACES the user's full channel assignment set —
-  // not a merge. Omit the field entirely to leave assignments untouched.
+  // When provided, REPLACES the user's full permission set — not a merge.
+  // Omit to leave it untouched. Ignored for Super Admin; see
+  // UsersService.create for what's stripped regardless of role. Store
+  // assignment is derived from this (see UsersService.update) rather than
+  // being a separate field — granting a permission under a specific
+  // store's scope is what assigns the user to that store.
   @IsOptional()
-  @IsArray()
-  @IsString({ each: true })
-  channelIds?: string[];
+  @IsObject()
+  permissions?: PermissionsByScopeDto;
 
   @IsOptional()
   @IsBoolean()
