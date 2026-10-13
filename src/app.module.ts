@@ -21,6 +21,7 @@ import { UploadsModule } from './uploads/uploads.module';
 import { SuppliersModule } from './suppliers/suppliers.module';
 import { PurchasesModule } from './purchases/purchases.module';
 import { SettingsModule } from './settings/settings.module';
+import { IntegrationsModule } from './integrations/integrations.module';
 
 @Module({
   imports: [
@@ -47,6 +48,7 @@ import { SettingsModule } from './settings/settings.module';
     SuppliersModule,
     PurchasesModule,
     SettingsModule,
+    IntegrationsModule,
   ],
   controllers: [AppController],
   providers: [AppService, { provide: APP_GUARD, useClass: ThrottlerGuard }],

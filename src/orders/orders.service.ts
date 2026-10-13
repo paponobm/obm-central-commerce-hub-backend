@@ -21,7 +21,10 @@ import {
 } from '../common/channel-scope/channel-scope.service';
 import { JwtPayload } from '../auth/types/jwt-payload.type';
 import { CustomersService } from '../customers/customers.service';
+import { IntegrationsService } from '../integrations/integrations.service';
+import { ProviderRegistry } from '../integrations/providers/provider-registry';
 import { CreateOrderDto } from './dto/create-order.dto';
+import { CreateOrderShipmentDto } from './dto/create-order-shipment.dto';
 import { UpdateOrderDto } from './dto/update-order.dto';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
 import { UpdateCustomerResponseDto } from './dto/update-customer-response.dto';
@@ -113,6 +116,8 @@ export class OrdersService {
     private readonly prisma: PrismaService,
     private readonly customersService: CustomersService,
     private readonly channelScope: ChannelScopeService,
+    private readonly integrationsService: IntegrationsService,
+    private readonly providerRegistry: ProviderRegistry,
   ) {}
 
   async findAll(
@@ -1717,6 +1722,114 @@ export class OrdersService {
       }),
     ]);
     return updated;
+  }
+
+  // Books a real shipment with the chosen courier integration. Deliberately
+  // separate from updateStatus/the SHIPPED transition — an admin can still
+  // mark an order SHIPPED by hand with no courier involved at all, exactly
+  // as before this existed; this only ever runs when explicitly asked to
+  // book via a specific integration, and never touches Order.status or
+  // Order.shipmentStatus or the stock-deduction logic in deductOnShip.
+  async createShipment(
+    id: string,
+    dto: CreateOrderShipmentDto,
+    actorUserId: string | undefined,
+    user: JwtPayload,
+  ) {
+    const order = await this.prisma.order.findUnique({ where: { id } });
+    if (!order) {
+      throw new NotFoundException(`Order ${id} not found`);
+    }
+    await this.assertChannelAccess(user, order.channelId);
+
+    const existingShipment = await this.prisma.shipment.findUnique({
+      where: { orderId: id },
+    });
+    // A double-click or retried request must never book twice — once a
+    // consignment id comes back from the courier, this order is done.
+    if (existingShipment?.externalConsignmentId) {
+      throw new ConflictException(
+        'A shipment has already been booked for this order',
+      );
+    }
+
+    const { provider, credentials } =
+      await this.integrationsService.getDecryptedCredentials(dto.integrationId);
+    const adapter = this.providerRegistry.get(provider);
+
+    // Conservative default: anything not fully PAID is collected as COD in
+    // full. There's no existing "amount already paid" helper to subtract a
+    // PARTIAL payment from — undercharging COD is worse than over-asking,
+    // so this doesn't try to be clever about partial payments yet.
+    const codAmount =
+      order.paymentStatus === PaymentStatus.PAID ? 0 : toNumber(order.total);
+
+    const result = await adapter.createShipment(credentials, {
+      invoice: order.orderNumber,
+      recipientName: order.shippingName,
+      recipientPhone: order.shippingPhone,
+      recipientAddress: order.shippingAddress,
+      codAmount,
+    });
+
+    if (!result.success) {
+      throw new BadRequestException(result.message);
+    }
+
+    const shipment = await this.prisma.$transaction(async (tx) => {
+      const saved = await tx.shipment.upsert({
+        where: { orderId: id },
+        create: {
+          orderId: id,
+          provider,
+          integrationId: dto.integrationId,
+          courierName: provider,
+          status: 'PROCESSING',
+          externalConsignmentId: result.externalConsignmentId,
+          externalTrackingCode: result.externalTrackingCode,
+          trackingNumber: result.externalTrackingCode,
+          codAmount,
+          rawResponse: result.raw as Prisma.InputJsonValue,
+          lastSyncedAt: new Date(),
+        },
+        update: {
+          provider,
+          integrationId: dto.integrationId,
+          courierName: provider,
+          status: 'PROCESSING',
+          externalConsignmentId: result.externalConsignmentId,
+          externalTrackingCode: result.externalTrackingCode,
+          trackingNumber: result.externalTrackingCode,
+          codAmount,
+          rawResponse: result.raw as Prisma.InputJsonValue,
+          lastSyncedAt: new Date(),
+        },
+      });
+      await tx.shipmentEvent.create({
+        data: {
+          shipmentId: saved.id,
+          status: 'PROCESSING',
+          note: `Booked via ${provider}`,
+          rawResponse: result.raw as Prisma.InputJsonValue,
+        },
+      });
+      await tx.auditLog.create({
+        data: {
+          userId: actorUserId,
+          action: 'shipment.created_via_courier',
+          entityType: 'Order',
+          entityId: id,
+          after: {
+            provider,
+            integrationId: dto.integrationId,
+            externalConsignmentId: result.externalConsignmentId,
+          } as Prisma.InputJsonValue,
+        },
+      });
+      return saved;
+    });
+
+    return shipment;
   }
 
   private async deductOnShip(

@@ -28,6 +28,10 @@ const PERMISSIONS: { key: string; label: string }[] = [
   { key: 'shipments.view', label: 'View shipments' },
   { key: 'shipments.manage', label: 'Update shipments' },
   { key: 'suppliers.manage', label: 'Manage suppliers & purchases' },
+  {
+    key: 'integrations.manage',
+    label: 'Manage courier integrations & credentials',
+  },
   { key: 'reports.view', label: 'View reports' },
   // Independent of reports.view on purpose — a user can have one without
   // the other (e.g. Dashboard summary access without the deeper sales

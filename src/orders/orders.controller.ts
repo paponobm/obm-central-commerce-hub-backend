@@ -30,6 +30,7 @@ import { MarkPrintedDto } from './dto/mark-printed.dto';
 import { UpdateCheckoutLeadDto } from './dto/update-checkout-lead.dto';
 import { CancelCheckoutLeadDto } from './dto/cancel-checkout-lead.dto';
 import { AddOrderNoteDto } from './dto/add-order-note.dto';
+import { CreateOrderShipmentDto } from './dto/create-order-shipment.dto';
 
 @Controller('admin/orders')
 @UseGuards(JwtAuthGuard, PermissionsGuard)
@@ -231,5 +232,18 @@ export class OrdersController {
     @CurrentUser() user: JwtPayload,
   ) {
     return this.ordersService.updateCustomerResponse(id, dto, user.sub, user);
+  }
+
+  // Books a real shipment via a configured courier integration — separate
+  // from the manual SHIPPED status flow above (@Patch(':id/status')),
+  // which keeps working unchanged with no courier involved.
+  @Post(':id/shipment')
+  @RequirePermissions('shipments.manage')
+  createShipment(
+    @Param('id') id: string,
+    @Body() dto: CreateOrderShipmentDto,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.ordersService.createShipment(id, dto, user.sub, user);
   }
 }

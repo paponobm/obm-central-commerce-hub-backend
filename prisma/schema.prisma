@@ -1,5 +1,5 @@
 generator client {
-  provider = "prisma-client-js"
+  provider        = "prisma-client-js"
   previewFeatures = ["relationJoins"]
 }
 
@@ -79,6 +79,14 @@ enum ShipmentStatus {
   RETURNED
 }
 
+// The set of courier APIs this install knows how to talk to — see
+// src/integrations/providers/provider-registry.ts for the adapter behind
+// each value. Adding a new courier means adding a value here plus an
+// adapter class; no other schema change needed.
+enum IntegrationProvider {
+  STEADFAST
+}
+
 // StockMovement.type: direction is encoded by the sign of `quantity`,
 // this enum only records *why* the movement happened (see ARCHITECTURE.md
 // "Inventory Strategy" for the full state machine).
@@ -122,14 +130,16 @@ model User {
 
   role Role @relation(fields: [roleId], references: [id])
 
-  createdOrders      Order[]              @relation("OrderCreatedBy")
-  orderStatusChanges OrderStatusHistory[]
-  stockMovements     StockMovement[]
-  auditLogs          AuditLog[]
-  purchases          Purchase[]
-  channels           UserChannel[]
-  permissions        UserPermission[]
-  channelPermissions UserChannelPermission[]
+  createdOrders       Order[]                 @relation("OrderCreatedBy")
+  orderStatusChanges  OrderStatusHistory[]
+  stockMovements      StockMovement[]
+  auditLogs           AuditLog[]
+  purchases           Purchase[]
+  channels            UserChannel[]
+  permissions         UserPermission[]
+  channelPermissions  UserChannelPermission[]
+  createdIntegrations Integration[]           @relation("IntegrationCreatedBy")
+  updatedIntegrations Integration[]           @relation("IntegrationUpdatedBy")
 
   @@index([roleId])
   @@map("users")
@@ -148,11 +158,11 @@ model Role {
 }
 
 model Permission {
-  id    String           @id @default(cuid())
-  key   String           @unique // e.g. "orders.create", "products.publish"
-  label String
-  roles RolePermission[]
-  users UserPermission[]
+  id           String                  @id @default(cuid())
+  key          String                  @unique // e.g. "orders.create", "products.publish"
+  label        String
+  roles        RolePermission[]
+  users        UserPermission[]
   userChannels UserChannelPermission[]
 
   @@map("permissions")
@@ -226,6 +236,7 @@ model Channel {
   users           UserChannel[]
   userPermissions UserChannelPermission[]
   checkoutLeads   CheckoutLead[]
+  integrations    Integration[]
 
   @@map("channels")
 }
@@ -235,21 +246,21 @@ model Channel {
 // to place the order. Shown as Incomplete on Web Orders. One row per
 // channel + phone; it is deleted when an order is placed with that phone.
 model CheckoutLead {
-  id        String   @id @default(cuid())
-  channelId String
-  phone     String
-  name      String?
-  address   String?
-  items     Json // [{ productId, quantity, unitPrice }] as the customer entered them
+  id               String                  @id @default(cuid())
+  channelId        String
+  phone            String
+  name             String?
+  address          String?
+  items            Json // [{ productId, quantity, unitPrice }] as the customer entered them
   // Items as the admin is preparing them in Ordered products; empty until edited.
-  adminItems Json?
+  adminItems       Json?
   // Empty until set from Order actions; an empty response keeps the lead in Incomplete.
   // Carried to the order when it is created.
   customerResponse CustomerResponseStatus?
   // Set when cancelled from Order actions; puts the lead in the Cancel tab.
-  cancelledAt DateTime?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  cancelledAt      DateTime?
+  createdAt        DateTime                @default(now())
+  updatedAt        DateTime                @updatedAt
 
   channel Channel @relation(fields: [channelId], references: [id])
 
@@ -450,14 +461,14 @@ model Customer {
 // =====================================================================
 
 model Order {
-  id             String         @id @default(cuid())
-  orderNumber    String         @unique // human-readable, e.g. OBM-10001
-  channelId      String? // null allowed for e.g. a pure phone/manual order with no storefront
-  source         OrderSource
-  customerId     String
-  status           OrderStatus            @default(PENDING)
-  paymentStatus    PaymentStatus          @default(UNPAID)
-  shipmentStatus   ShipmentStatus         @default(NOT_SHIPPED)
+  id               String                  @id @default(cuid())
+  orderNumber      String                  @unique // human-readable, e.g. OBM-10001
+  channelId        String? // null allowed for e.g. a pure phone/manual order with no storefront
+  source           OrderSource
+  customerId       String
+  status           OrderStatus             @default(PENDING)
+  paymentStatus    PaymentStatus           @default(UNPAID)
+  shipmentStatus   ShipmentStatus          @default(NOT_SHIPPED)
   // Empty until someone sets it from Web Orders; an empty response means the
   // order is waiting in Processing.
   customerResponse CustomerResponseStatus?
@@ -478,12 +489,12 @@ model Order {
   // which is set later, when the order actually ships.
   deliveryMethod  String?
 
-  createdById String? // staff user for MANUAL/PHONE/etc orders; null for WEBSITE
+  createdById   String? // staff user for MANUAL/PHONE/etc orders; null for WEBSITE
   // Set when a website order is approved from Web Orders; until then it is
   // kept out of the Order List.
   webApprovedAt DateTime?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
 
   channel   Channel? @relation(fields: [channelId], references: [id])
   customer  Customer @relation(fields: [customerId], references: [id])
@@ -559,23 +570,85 @@ model Payment {
 }
 
 // =====================================================================
-// SHIPMENTS
+// COURIER INTEGRATIONS
 // =====================================================================
 
-model Shipment {
-  id             String         @id @default(cuid())
-  orderId        String         @unique
-  courierName    String?
-  trackingNumber String?
-  status         ShipmentStatus @default(NOT_SHIPPED)
-  shippedAt      DateTime?
-  deliveredAt    DateTime?
-  createdAt      DateTime       @default(now())
-  updatedAt      DateTime       @updatedAt
+// One configured courier account. `credentials` is always an encrypted
+// blob (see EncryptionService) — never plaintext, never returned to the
+// frontend. `label` lets the same provider be configured more than once
+// (two Steadfast accounts, say). Display status (Connected/Disconnected/
+// Error/Disabled) is derived from isEnabled + lastTestSuccess in the
+// service layer rather than stored, so it can't drift from reality.
+model Integration {
+  id              String              @id @default(cuid())
+  provider        IntegrationProvider
+  label           String
+  channelId       String? // null = account-wide, not tied to one storefront
+  credentials     Json // encrypted compound blob, see EncryptionService
+  isEnabled       Boolean             @default(true)
+  isDefault       Boolean             @default(false)
+  lastTestedAt    DateTime?
+  lastTestSuccess Boolean?
+  lastTestMessage String?
+  createdById     String?
+  updatedById     String?
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+  deletedAt       DateTime?
 
-  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  channel   Channel? @relation(fields: [channelId], references: [id])
+  createdBy User?    @relation("IntegrationCreatedBy", fields: [createdById], references: [id])
+  updatedBy User?    @relation("IntegrationUpdatedBy", fields: [updatedById], references: [id])
+
+  shipments Shipment[]
+
+  @@index([provider])
+  @@map("integrations")
+}
+
+model Shipment {
+  id                    String               @id @default(cuid())
+  orderId               String               @unique
+  courierName           String?
+  trackingNumber        String?
+  status                ShipmentStatus       @default(NOT_SHIPPED)
+  shippedAt             DateTime?
+  deliveredAt           DateTime?
+  // Set only when booked through a configured Integration — a shipment
+  // can still exist with just courierName/trackingNumber typed manually,
+  // same as before this module existed.
+  provider              IntegrationProvider?
+  integrationId         String?
+  externalConsignmentId String?
+  externalTrackingCode  String?
+  codAmount             Decimal?             @db.Decimal(12, 2)
+  rawResponse           Json?
+  lastSyncedAt          DateTime?
+  createdAt             DateTime             @default(now())
+  updatedAt             DateTime             @updatedAt
+
+  order       Order           @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  integration Integration?    @relation(fields: [integrationId], references: [id])
+  events      ShipmentEvent[]
 
   @@map("shipments")
+}
+
+// Append-only history for a shipment's lifecycle — mirrors
+// OrderStatusHistory's pattern. Populated from webhook/poll updates, not
+// yet wired up in this phase (createShipment's response is the first row).
+model ShipmentEvent {
+  id          String         @id @default(cuid())
+  shipmentId  String
+  status      ShipmentStatus
+  note        String?
+  rawResponse Json?
+  createdAt   DateTime       @default(now())
+
+  shipment Shipment @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+
+  @@index([shipmentId])
+  @@map("shipment_events")
 }
 
 // =====================================================================
