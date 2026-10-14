@@ -210,6 +210,14 @@ export class OrdersService {
         customer: { select: { id: true, name: true, phone: true } },
         channel: { select: { id: true, name: true, slug: true } },
         createdBy: { select: { id: true, name: true } },
+        shipment: {
+          select: {
+            id: true,
+            provider: true,
+            status: true,
+            externalConsignmentId: true,
+          },
+        },
         items: {
           include: {
             product: {
@@ -1736,7 +1744,10 @@ export class OrdersService {
     actorUserId: string | undefined,
     user: JwtPayload,
   ) {
-    const order = await this.prisma.order.findUnique({ where: { id } });
+    const order = await this.prisma.order.findUnique({
+      where: { id },
+      include: { items: { select: { productName: true, quantity: true } } },
+    });
     if (!order) {
       throw new NotFoundException(`Order ${id} not found`);
     }
@@ -1764,12 +1775,21 @@ export class OrdersService {
     const codAmount =
       order.paymentStatus === PaymentStatus.PAID ? 0 : toNumber(order.total);
 
+    // Lets the courier (and the merchant, browsing their own Steadfast
+    // panel) see what's actually in the parcel — shows up as "Contents &
+    // note" there. Steadfast truncates notes over 480 characters rather
+    // than rejecting them, so no length handling needed here.
+    const note = order.items
+      .map((item) => `${item.productName} x${item.quantity}`)
+      .join(', ');
+
     const result = await adapter.createShipment(credentials, {
       invoice: order.orderNumber,
       recipientName: order.shippingName,
       recipientPhone: order.shippingPhone,
       recipientAddress: order.shippingAddress,
       codAmount,
+      note,
     });
 
     if (!result.success) {
