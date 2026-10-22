@@ -35,7 +35,16 @@ export class InventoryService {
             }
           : {}),
       },
-      include: { product: { select: { id: true, sku: true, name: true } } },
+      include: {
+        product: {
+          select: {
+            id: true,
+            sku: true,
+            name: true,
+            images: { take: 1, orderBy: { sortOrder: 'asc' } },
+          },
+        },
+      },
       orderBy: { product: { name: 'asc' } },
     });
 
@@ -43,6 +52,7 @@ export class InventoryService {
       productId: row.productId,
       sku: row.product.sku,
       name: row.product.name,
+      imageUrl: row.product.images[0]?.url ?? null,
       currentStock: row.currentStock,
       reservedStock: row.reservedStock,
       availableStock: row.currentStock - row.reservedStock,
@@ -59,7 +69,16 @@ export class InventoryService {
   async findOne(productId: string) {
     const row = await this.prisma.inventory.findUnique({
       where: { productId },
-      include: { product: { select: { id: true, sku: true, name: true } } },
+      include: {
+        product: {
+          select: {
+            id: true,
+            sku: true,
+            name: true,
+            images: { take: 1, orderBy: { sortOrder: 'asc' } },
+          },
+        },
+      },
     });
     if (!row) {
       throw new NotFoundException(
@@ -70,6 +89,7 @@ export class InventoryService {
       productId: row.productId,
       sku: row.product.sku,
       name: row.product.name,
+      imageUrl: row.product.images[0]?.url ?? null,
       currentStock: row.currentStock,
       reservedStock: row.reservedStock,
       availableStock: row.currentStock - row.reservedStock,

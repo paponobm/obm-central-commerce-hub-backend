@@ -1690,11 +1690,18 @@ export class OrdersService {
     return runTransaction(
       this.prisma,
       async (tx) => {
-        // CANCELLED and reactivating back to PENDING have nothing to do to
-        // stock — nothing was ever reserved for this order to release or
-        // re-reserve (see deductOnShip: stock only moves on SHIPPED/RETURNED).
-        if (dto.status === 'SHIPPED') {
+        // Stock is committed to an order the moment it's marked Ready to
+        // Ship — not when it's later marked Shipped — since that's when its
+        // items actually get pulled aside for packing. SHIPPED itself does
+        // nothing to stock below: it's only reachable from READY_TO_SHIP,
+        // so the deduction already happened on the way in. Leaving RTS for
+        // anything other than actually shipping (back to Pending/
+        // Processing, or cancelling) puts that same stock straight back —
+        // same as a post-shipment RETURNED does once it's gone further.
+        if (dto.status === 'READY_TO_SHIP') {
           await this.deductOnShip(tx, order, actorUserId);
+        } else if (order.status === 'READY_TO_SHIP' && dto.status !== 'SHIPPED') {
+          await this.restockOnReturn(tx, order, 'restock', actorUserId, 'rts_reversal');
         } else if (dto.status === 'RETURNED') {
           await this.restockOnReturn(
             tx,
@@ -1920,9 +1927,8 @@ export class OrdersService {
     },
     actorUserId?: string,
   ) {
-    // The sole point where an order ever moves stock: nothing was reserved
-    // at order-creation time, so this only has to check against — and
-    // deduct from — currentStock itself (no reservedStock bookkeeping).
+    // Fires once an order reaches READY_TO_SHIP — only has to check against
+    // and deduct from currentStock itself (no reservedStock bookkeeping).
     const movements: Prisma.StockMovementCreateManyInput[] = [];
     for (const item of order.items) {
       const rows = await tx.$queryRaw<StockRow[]>`
@@ -1934,7 +1940,7 @@ export class OrdersService {
       `;
       if (rows.length === 0) {
         throw new ConflictException(
-          `Cannot ship — insufficient stock for ${item.sku} (${item.productName})`,
+          `Cannot mark Ready to Ship — insufficient stock for ${item.sku} (${item.productName})`,
         );
       }
       movements.push({
@@ -1944,7 +1950,7 @@ export class OrdersService {
         balanceAfter: rows[0].currentStock,
         referenceType: 'ORDER',
         referenceId: order.id,
-        note: `Shipped — order ${order.orderNumber}`,
+        note: `Ready to Ship — order ${order.orderNumber}`,
         createdById: actorUserId,
       });
     }
@@ -1960,6 +1966,11 @@ export class OrdersService {
     },
     action: 'restock' | 'write_off',
     actorUserId?: string,
+    // Lets the ledger note say what actually happened — an order reversed
+    // out of READY_TO_SHIP (back to Pending/Processing, or cancelled) never
+    // physically left the building, so it isn't a "return" in the normal,
+    // post-shipment sense even though the stock movement is identical.
+    reason: 'returned' | 'rts_reversal' = 'returned',
   ) {
     // write_off intentionally writes no StockMovement — nothing changed in
     // Inventory, so there's nothing to log in a ledger whose whole purpose
@@ -1982,7 +1993,10 @@ export class OrdersService {
         balanceAfter: rows[0].currentStock,
         referenceType: 'ORDER',
         referenceId: order.id,
-        note: `Returned & restocked — order ${order.orderNumber}`,
+        note:
+          reason === 'rts_reversal'
+            ? `Moved out of Ready to Ship — order ${order.orderNumber}`
+            : `Returned & restocked — order ${order.orderNumber}`,
         createdById: actorUserId,
       });
     }
