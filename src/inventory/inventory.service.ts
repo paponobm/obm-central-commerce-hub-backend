@@ -118,7 +118,10 @@ export class InventoryService {
       where: { productId },
       orderBy: { createdAt: 'desc' },
       take,
-      include: { createdBy: { select: { id: true, name: true } } },
+      include: {
+        createdBy: { select: { id: true, name: true } },
+        product: { select: { id: true, sku: true, name: true } },
+      },
     });
   }
 
