@@ -47,7 +47,17 @@ const TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
   // (see deductOnShip).
   CONFIRMED: ['PROCESSING', 'PENDING', 'PENDING_CANCEL', 'CANCELLED'],
   PROCESSING: ['READY_TO_SHIP', 'CONFIRMED', 'PENDING_CANCEL', 'CANCELLED'],
-  READY_TO_SHIP: ['SHIPPED', 'PROCESSING', 'PENDING_CANCEL', 'CANCELLED'],
+  // PENDING (not just PROCESSING) is allowed here too, mirroring the
+  // forward direction's own PENDING -> RTS shortcut (which skips
+  // CONFIRMED/PROCESSING since neither has its own tab) — the bulk
+  // "move back" action targets PENDING directly for the same reason.
+  READY_TO_SHIP: [
+    'SHIPPED',
+    'PROCESSING',
+    'PENDING',
+    'PENDING_CANCEL',
+    'CANCELLED',
+  ],
   SHIPPED: ['DELIVERED', 'PARTIAL', 'PENDING_RETURN', 'LOST'],
   PARTIAL: ['DELIVERED', 'PENDING_RETURN', 'RETURNED'],
   DELIVERED: ['PENDING_RETURN', 'RETURNED'],
@@ -95,7 +105,11 @@ function describeOrderLog(action: string, after: unknown): string {
 }
 
 function describeLeadLog(action: string, after: unknown): string {
-  const data = (after ?? {}) as { note?: string; customerResponse?: string; items?: unknown };
+  const data = (after ?? {}) as {
+    note?: string;
+    customerResponse?: string;
+    items?: unknown;
+  };
   switch (action) {
     case 'order.note':
       return `Note added: ${data.note ?? ''}`;
@@ -147,7 +161,13 @@ export class OrdersService {
         // A website order stays in Web Orders until it is approved.
         ...(filters.includeWebUnapproved
           ? {}
-          : { NOT: { source: 'WEBSITE', status: 'PENDING', webApprovedAt: null } }),
+          : {
+              NOT: {
+                source: 'WEBSITE',
+                status: 'PENDING',
+                webApprovedAt: null,
+              },
+            }),
         ...(filters.status ? { status: filters.status } : {}),
         ...(filters.source ? { source: filters.source } : {}),
         ...(filters.paymentStatus
@@ -403,14 +423,20 @@ export class OrdersService {
         updatedAt: true,
       },
     });
-    type StoredLeadItem = { productId: string; quantity: number; unitPrice: number };
+    type StoredLeadItem = {
+      productId: string;
+      quantity: number;
+      unitPrice: number;
+    };
     const storedItems = (stored: unknown) => (stored ?? []) as StoredLeadItem[];
     const productIds = [
       ...new Set(
-        leads.flatMap((l) => [
-          ...storedItems(l.items),
-          ...storedItems(l.adminItems),
-        ]).map((i) => i.productId),
+        leads
+          .flatMap((l) => [
+            ...storedItems(l.items),
+            ...storedItems(l.adminItems),
+          ])
+          .map((i) => i.productId),
       ),
     ];
     const products = await this.prisma.product.findMany({
@@ -419,7 +445,11 @@ export class OrdersService {
         id: true,
         name: true,
         sku: true,
-        images: { orderBy: { sortOrder: 'asc' }, take: 1, select: { url: true } },
+        images: {
+          orderBy: { sortOrder: 'asc' },
+          take: 1,
+          select: { url: true },
+        },
       },
     });
     const productById = new Map(products.map((p) => [p.id, p]));
@@ -429,7 +459,9 @@ export class OrdersService {
         where: {
           entityType: 'CheckoutLead',
           entityId: { in: leadIds },
-          action: { in: ['checkout_lead.response_change', 'checkout_lead.update'] },
+          action: {
+            in: ['checkout_lead.response_change', 'checkout_lead.update'],
+          },
         },
         orderBy: { createdAt: 'desc' },
         distinct: ['entityId'],
@@ -457,7 +489,12 @@ export class OrdersService {
     ]);
     const notesByLead = new Map<
       string,
-      { id: string; note: string; createdAt: Date; user: { name: string } | null }[]
+      {
+        id: string;
+        note: string;
+        createdAt: Date;
+        user: { name: string } | null;
+      }[]
     >();
     for (const n of noteLogs) {
       const list = notesByLead.get(n.entityId) ?? [];
@@ -646,7 +683,11 @@ export class OrdersService {
   async listCheckoutLeadNotes(leadId: string, user: JwtPayload) {
     await this.assertCheckoutLeadAccess(leadId, user);
     return this.prisma.auditLog.findMany({
-      where: { entityType: 'CheckoutLead', entityId: leadId, action: 'order.note' },
+      where: {
+        entityType: 'CheckoutLead',
+        entityId: leadId,
+        action: 'order.note',
+      },
       orderBy: { createdAt: 'desc' },
       select: {
         id: true,
@@ -728,14 +769,17 @@ export class OrdersService {
       throw new NotFoundException(`Checkout lead ${leadId} not found`);
     }
 
-    let adminItems: { productId: string; quantity: number; unitPrice: number }[] | undefined;
+    let adminItems:
+      { productId: string; quantity: number; unitPrice: number }[] | undefined;
     if (dto.items) {
       const ids = dto.items.map((i) => i.productId);
       const listed = await this.prisma.productChannel.findMany({
         where: { channelId: lead.channelId, productId: { in: ids } },
         select: { productId: true, price: true },
       });
-      const priceById = new Map(listed.map((pc) => [pc.productId, toNumber(pc.price)]));
+      const priceById = new Map(
+        listed.map((pc) => [pc.productId, toNumber(pc.price)]),
+      );
       adminItems = dto.items.map((i) => {
         const price = priceById.get(i.productId);
         if (price === undefined) {
@@ -900,7 +944,8 @@ export class OrdersService {
       const current = last.get(id);
       if (!current || at > current.at) last.set(id, { at, by });
     };
-    for (const a of audits) consider(a.entityId, a.createdAt, a.user?.name ?? null);
+    for (const a of audits)
+      consider(a.entityId, a.createdAt, a.user?.name ?? null);
     for (const c of statusChanges)
       consider(c.orderId, c.createdAt, c.changedBy?.name ?? null);
     return last;
@@ -910,7 +955,12 @@ export class OrdersService {
   private async getAdminNotes(orderIds: string[]) {
     const notes = new Map<
       string,
-      { id: string; note: string; createdAt: Date; user: { name: string } | null }[]
+      {
+        id: string;
+        note: string;
+        createdAt: Date;
+        user: { name: string } | null;
+      }[]
     >();
     if (orderIds.length === 0) return notes;
 
@@ -1570,7 +1620,9 @@ export class OrdersService {
 
     const payment = order.payments.find((p) => p.id === paymentId);
     if (!payment) {
-      throw new NotFoundException(`Payment ${paymentId} not found on this order`);
+      throw new NotFoundException(
+        `Payment ${paymentId} not found on this order`,
+      );
     }
 
     if (order.status === 'CANCELLED') {
@@ -1597,7 +1649,9 @@ export class OrdersService {
           amount: dto.amount,
           method: dto.method,
           transactionId:
-            dto.transactionId !== undefined ? dto.transactionId || null : undefined,
+            dto.transactionId !== undefined
+              ? dto.transactionId || null
+              : undefined,
           status: paymentStatus === 'PAID' ? 'PAID' : 'PARTIAL',
         },
       }),

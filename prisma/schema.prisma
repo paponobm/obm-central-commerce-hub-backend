@@ -585,6 +585,10 @@ model Integration {
   label           String
   channelId       String? // null = account-wide, not tied to one storefront
   credentials     Json // encrypted compound blob, see EncryptionService
+  // Encrypted, same scheme as credentials. Generated on demand and shown
+  // to the admin exactly once (to paste into the provider's webhook
+  // settings) — never re-displayed after that, only regenerated.
+  webhookSecret   String?
   isEnabled       Boolean             @default(true)
   isDefault       Boolean             @default(false)
   lastTestedAt    DateTime?

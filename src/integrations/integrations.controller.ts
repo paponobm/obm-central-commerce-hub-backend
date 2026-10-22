@@ -70,4 +70,14 @@ export class IntegrationsController {
   setDefault(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
     return this.integrationsService.setDefault(id, user.sub);
   }
+
+  // Returns the new secret in plaintext exactly once — the frontend shows
+  // it in a one-time dialog and never fetches it again afterwards.
+  @Post(':id/webhook-secret/regenerate')
+  regenerateWebhookSecret(
+    @Param('id') id: string,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.integrationsService.regenerateWebhookSecret(id, user.sub);
+  }
 }

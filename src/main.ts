@@ -6,7 +6,14 @@ import { join } from 'path';
 import { AppModule } from './app.module';
 
 async function bootstrap() {
-  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  // rawBody: true buffers the exact request bytes onto req.rawBody
+  // alongside the normal parsed req.body — needed to verify a webhook's
+  // HMAC signature, which is computed over the raw bytes the sender
+  // actually transmitted, not a re-serialized copy that could differ in
+  // key order or whitespace. Every other route is unaffected.
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
+    rawBody: true,
+  });
 
   app.use(cookieParser());
 

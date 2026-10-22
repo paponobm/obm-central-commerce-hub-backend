@@ -1,5 +1,11 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Integration, IntegrationProvider, Prisma } from '@prisma/client';
+import { createHmac, randomBytes, timingSafeEqual } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { EncryptionService } from '../common/crypto/encryption.service';
 import { ProviderRegistry } from './providers/provider-registry';
@@ -15,6 +21,7 @@ export class IntegrationsService {
     private readonly prisma: PrismaService,
     private readonly encryption: EncryptionService,
     private readonly registry: ProviderRegistry,
+    private readonly config: ConfigService,
   ) {}
 
   providersMeta() {
@@ -158,6 +165,73 @@ export class IntegrationsService {
     return this.toListItem(updated);
   }
 
+  // Generates a fresh random secret, encrypts and stores it, and returns
+  // the PLAINTEXT secret exactly once — the admin copies it into the
+  // provider's own webhook settings (as their "auth token"); we never
+  // display it again after this response, only regenerate.
+  async regenerateWebhookSecret(
+    id: string,
+    actorUserId: string,
+  ): Promise<{ secret: string; webhookUrl: string }> {
+    const existing = await this.findRowOrThrow(id);
+    const secret = randomBytes(24).toString('hex');
+    await this.prisma.integration.update({
+      where: { id },
+      data: {
+        webhookSecret: this.encryption.encrypt(secret),
+        updatedById: actorUserId,
+      },
+    });
+    await this.audit(
+      actorUserId,
+      'integration.webhook_secret_regenerated',
+      id,
+      {
+        provider: existing.provider,
+        label: existing.label,
+      },
+    );
+    return { secret, webhookUrl: this.webhookUrl(existing.provider, id) };
+  }
+
+  webhookUrl(provider: IntegrationProvider, id: string): string {
+    const base = this.config.get<string>('PUBLIC_URL') ?? '';
+    return `${base}/api/webhooks/${provider.toLowerCase()}/${id}`;
+  }
+
+  // Verifies an inbound webhook call's HMAC-SHA256 signature against the
+  // integration's own stored secret, using a constant-time comparison so
+  // response timing can't leak how much of the signature matched. Throws
+  // (never silently "verifies" a bad signature) if the integration has no
+  // secret configured yet, or the signature doesn't match — the caller
+  // should treat either as "reject this request", not "process it".
+  async verifyWebhookRequest(
+    integrationId: string,
+    rawBody: Buffer,
+    signatureHex: string | undefined,
+  ): Promise<Integration> {
+    const integration = await this.findRowOrThrow(integrationId);
+    if (!integration.webhookSecret) {
+      throw new ForbiddenException(
+        'No webhook secret configured for this integration',
+      );
+    }
+    if (!signatureHex) {
+      throw new ForbiddenException('Missing signature');
+    }
+    const secret = this.encryption.decrypt(integration.webhookSecret);
+    const expected = createHmac('sha256', secret).update(rawBody).digest('hex');
+    const expectedBuf = Buffer.from(expected, 'hex');
+    const actualBuf = Buffer.from(signatureHex, 'hex');
+    const valid =
+      expectedBuf.length === actualBuf.length &&
+      timingSafeEqual(expectedBuf, actualBuf);
+    if (!valid) {
+      throw new ForbiddenException('Invalid signature');
+    }
+    return integration;
+  }
+
   // Decrypts credentials for internal callers (e.g. the order→shipment
   // hook) — never exposed through a controller route.
   async getDecryptedCredentials(id: string): Promise<{
@@ -230,6 +304,8 @@ export class IntegrationsService {
       lastTestSuccess: row.lastTestSuccess,
       lastTestMessage: row.lastTestMessage,
       credentials: maskedCredentials,
+      webhookUrl: this.webhookUrl(row.provider, row.id),
+      hasWebhookSecret: !!row.webhookSecret,
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
     };
