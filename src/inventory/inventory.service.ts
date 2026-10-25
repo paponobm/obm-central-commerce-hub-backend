@@ -106,23 +106,54 @@ export class InventoryService {
       take,
       include: {
         createdBy: { select: { id: true, name: true } },
-        product: { select: { id: true, sku: true, name: true } },
+        product: {
+          select: {
+            id: true,
+            sku: true,
+            name: true,
+            images: { take: 1, orderBy: { sortOrder: 'asc' } },
+          },
+        },
       },
     });
-    return rows;
+    return rows.map((row) => ({
+      ...row,
+      product: row.product && {
+        id: row.product.id,
+        sku: row.product.sku,
+        name: row.product.name,
+        imageUrl: row.product.images[0]?.url ?? null,
+      },
+    }));
   }
 
   async getMovements(productId: string, take = 50) {
     await this.assertInventoryExists(productId);
-    return this.prisma.stockMovement.findMany({
+    const rows = await this.prisma.stockMovement.findMany({
       where: { productId },
       orderBy: { createdAt: 'desc' },
       take,
       include: {
         createdBy: { select: { id: true, name: true } },
-        product: { select: { id: true, sku: true, name: true } },
+        product: {
+          select: {
+            id: true,
+            sku: true,
+            name: true,
+            images: { take: 1, orderBy: { sortOrder: 'asc' } },
+          },
+        },
       },
     });
+    return rows.map((row) => ({
+      ...row,
+      product: row.product && {
+        id: row.product.id,
+        sku: row.product.sku,
+        name: row.product.name,
+        imageUrl: row.product.images[0]?.url ?? null,
+      },
+    }));
   }
 
   // The only sanctioned way to touch currentStock outside the order-reserve
