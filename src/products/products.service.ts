@@ -17,6 +17,7 @@ import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 import { AddProductImageDto } from './dto/add-product-image.dto';
 import { UpsertProductChannelDto } from './dto/upsert-product-channel.dto';
+import { SetProductCategoriesDto } from './dto/set-product-categories.dto';
 
 @Injectable()
 export class ProductsService {
@@ -355,6 +356,44 @@ export class ProductsService {
       where: { productId_channelId: { productId, channelId } },
       data: { isPublished: false },
     });
+  }
+
+  // Extra storefront categories (on top of Product.categoryId) — lets a
+  // product show up under several category pages at once.
+  async getProductCategories(productId: string, user: JwtPayload) {
+    await this.requireActiveProduct(productId);
+    await this.assertVisibleById(user, productId);
+    const rows = await this.prisma.productCategory.findMany({
+      where: { productId },
+      include: { category: true },
+      orderBy: { category: { name: 'asc' } },
+    });
+    return rows.map((r) => r.category);
+  }
+
+  async setProductCategories(
+    productId: string,
+    dto: SetProductCategoriesDto,
+    user: JwtPayload,
+  ) {
+    await this.requireActiveProduct(productId);
+    await this.assertVisibleById(user, productId);
+    const categoryIds = [...new Set(dto.categoryIds)];
+    if (categoryIds.length > 0) {
+      const found = await this.prisma.category.count({
+        where: { id: { in: categoryIds }, deletedAt: null },
+      });
+      if (found !== categoryIds.length) {
+        throw new NotFoundException('One or more categories were not found');
+      }
+    }
+    await this.prisma.$transaction([
+      this.prisma.productCategory.deleteMany({ where: { productId } }),
+      this.prisma.productCategory.createMany({
+        data: categoryIds.map((categoryId) => ({ productId, categoryId })),
+      }),
+    ]);
+    return this.getProductCategories(productId, user);
   }
 
   private async requireActiveChannel(channelId: string) {

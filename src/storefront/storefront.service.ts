@@ -17,6 +17,9 @@ const productChannelWithProduct =
           category: true,
           brand: true,
           inventory: true,
+          // Extra categories (on top of the single `category` above) — lets
+          // a product show up under more than one storefront category page.
+          categories: { include: { category: true } },
         },
       },
     },
@@ -69,7 +72,17 @@ export class StorefrontService {
       product: {
         isActive: true,
         deletedAt: null,
-        ...(filters.categoryId ? { categoryId: filters.categoryId } : {}),
+        // A product matches a category page either via its single primary
+        // categoryId, or via the extra ProductCategory tags set in the
+        // admin's Publishing tab.
+        ...(filters.categoryId
+          ? {
+              OR: [
+                { categoryId: filters.categoryId },
+                { categories: { some: { categoryId: filters.categoryId } } },
+              ],
+            }
+          : {}),
       },
       ...(filters.search
         ? {
@@ -261,6 +274,20 @@ export class StorefrontService {
       category: pc.product.category
         ? { id: pc.product.category.id, name: pc.product.category.name }
         : null,
+      // Every category this product is tagged under (primary + extras) —
+      // used by category pages to decide what belongs there, and available
+      // for display wherever a product needs to show all its categories.
+      categories: [
+        ...(pc.product.category
+          ? [{ id: pc.product.category.id, name: pc.product.category.name }]
+          : []),
+        ...pc.product.categories.map((pcat) => ({
+          id: pcat.category.id,
+          name: pcat.category.name,
+        })),
+      ].filter(
+        (cat, idx, arr) => arr.findIndex((c) => c.id === cat.id) === idx,
+      ),
       brand: pc.product.brand
         ? { id: pc.product.brand.id, name: pc.product.brand.name }
         : null,

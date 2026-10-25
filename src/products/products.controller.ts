@@ -6,6 +6,7 @@ import {
   Param,
   Patch,
   Post,
+  Put,
   Query,
   UseGuards,
 } from '@nestjs/common';
@@ -20,6 +21,7 @@ import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 import { AddProductImageDto } from './dto/add-product-image.dto';
 import { UpsertProductChannelDto } from './dto/upsert-product-channel.dto';
+import { SetProductCategoriesDto } from './dto/set-product-categories.dto';
 
 @Controller('admin/products')
 @UseGuards(JwtAuthGuard, PermissionsGuard)
@@ -103,6 +105,27 @@ export class ProductsController {
     @CurrentUser() user: JwtPayload,
   ) {
     return this.productsService.getChannelOverrides(user, id);
+  }
+
+  // Extra storefront categories (on top of the single Category field on the
+  // Details tab) — a product can show up under several category pages.
+  @Get(':id/categories')
+  @RequirePermissions('products.view')
+  getProductCategories(
+    @Param('id') id: string,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.productsService.getProductCategories(id, user);
+  }
+
+  @Put(':id/categories')
+  @RequirePermissions('products.publish')
+  setProductCategories(
+    @Param('id') id: string,
+    @Body() dto: SetProductCategoriesDto,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.productsService.setProductCategories(id, dto, user);
   }
 
   @Post(':id/channels/:channelId')
