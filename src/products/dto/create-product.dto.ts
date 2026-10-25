@@ -41,6 +41,10 @@ export class CreateProductDto {
   brandId?: string;
 
   @IsOptional()
+  @IsString()
+  thumbnailUrl?: string;
+
+  @IsOptional()
   @IsBoolean()
   isActive?: boolean;
 }

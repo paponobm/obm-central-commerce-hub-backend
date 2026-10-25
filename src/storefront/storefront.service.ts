@@ -253,6 +253,10 @@ export class StorefrontService {
       price: toNumber(pc.price),
       compareAtPrice: pc.compareAtPrice ? toNumber(pc.compareAtPrice) : null,
       isFeatured: pc.isFeatured,
+      // The single cover image shown in listing cards, the cart, and as
+      // the main product-page image — falls back to the gallery's first
+      // shot for products that haven't had one set yet.
+      thumbnailUrl: pc.product.thumbnailUrl ?? pc.product.images[0]?.url ?? null,
       images: pc.product.images.map((i) => i.url),
       category: pc.product.category
         ? { id: pc.product.category.id, name: pc.product.category.name }

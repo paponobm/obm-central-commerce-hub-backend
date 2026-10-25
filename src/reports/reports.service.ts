@@ -353,6 +353,7 @@ export class ReportsService {
         id: true,
         sku: true,
         name: true,
+        thumbnailUrl: true,
         images: {
           take: 1,
           orderBy: { sortOrder: 'asc' },
@@ -369,7 +370,10 @@ export class ReportsService {
         productId: r.productId,
         sku: productById.get(r.productId)?.sku ?? null,
         name: productById.get(r.productId)?.name ?? 'Unknown product',
-        image: productById.get(r.productId)?.images[0]?.url ?? null,
+        image:
+          productById.get(r.productId)?.thumbnailUrl ??
+          productById.get(r.productId)?.images[0]?.url ??
+          null,
         quantitySold: r._sum.quantity ?? 0,
         revenue: toNumber(r._sum.total),
       })),

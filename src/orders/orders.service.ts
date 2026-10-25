@@ -242,6 +242,7 @@ export class OrdersService {
           include: {
             product: {
               select: {
+                thumbnailUrl: true,
                 images: {
                   take: 1,
                   orderBy: { sortOrder: 'asc' },
@@ -445,6 +446,7 @@ export class OrdersService {
         id: true,
         name: true,
         sku: true,
+        thumbnailUrl: true,
         images: {
           orderBy: { sortOrder: 'asc' },
           take: 1,
@@ -520,7 +522,7 @@ export class OrdersService {
             productId: i.productId,
             productName: product?.name ?? 'Unknown product',
             sku: product?.sku ?? '',
-            image: product?.images[0]?.url ?? null,
+            image: product?.thumbnailUrl ?? product?.images[0]?.url ?? null,
             quantity: i.quantity,
             unitPrice: i.unitPrice,
           };
@@ -1024,6 +1026,7 @@ export class OrdersService {
           include: {
             product: {
               select: {
+                thumbnailUrl: true,
                 images: {
                   take: 1,
                   orderBy: { sortOrder: 'asc' },

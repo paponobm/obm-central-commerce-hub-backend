@@ -332,6 +332,12 @@ model Product {
   unit        String    @default("pcs")
   categoryId  String?
   brandId     String?
+  // The single image shown anywhere a product needs a small icon (order
+  // lines, inventory, product lists) — distinct from `images` below, which
+  // is the storefront's full photo gallery. Falls back to the gallery's
+  // first image wherever it's read, so existing products don't go blank
+  // until an admin explicitly sets one.
+  thumbnailUrl String?
   isActive    Boolean   @default(true)
   deletedAt   DateTime?
   createdAt   DateTime  @default(now())
