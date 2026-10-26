@@ -22,6 +22,7 @@ import { SuppliersModule } from './suppliers/suppliers.module';
 import { PurchasesModule } from './purchases/purchases.module';
 import { SettingsModule } from './settings/settings.module';
 import { IntegrationsModule } from './integrations/integrations.module';
+import { OrderLocksModule } from './order-locks/order-locks.module';
 
 @Module({
   imports: [
@@ -49,6 +50,7 @@ import { IntegrationsModule } from './integrations/integrations.module';
     PurchasesModule,
     SettingsModule,
     IntegrationsModule,
+    OrderLocksModule,
   ],
   controllers: [AppController],
   providers: [AppService, { provide: APP_GUARD, useClass: ThrottlerGuard }],

@@ -151,6 +151,7 @@ model User {
   channelPermissions  UserChannelPermission[]
   createdIntegrations Integration[]           @relation("IntegrationCreatedBy")
   updatedIntegrations Integration[]           @relation("IntegrationUpdatedBy")
+  orderLocks          OrderLock[]
 
   @@index([roleId])
   @@map("users")
@@ -588,6 +589,26 @@ model OrderStatusHistory {
 
   @@index([orderId])
   @@map("order_status_history")
+}
+
+// Who currently has a Web Order detail page open — Web Orders list &
+// takeover/"Access Restricted" feature. orderId is the same id the Web
+// Orders list already uses per row (a real Order.id, or the synthetic
+// "lead-<CheckoutLead.id>" used for incomplete checkouts) — not an FK to
+// Order, since a lead has no Order row yet. A row with no fresh heartbeat
+// (see LOCK_TTL_MS in order-locks.service.ts) is treated as expired and
+// swept on the next read, so a crashed/closed tab never locks an order
+// forever.
+model OrderLock {
+  id        String   @id @default(cuid())
+  orderId   String   @unique
+  userId    String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("order_locks")
 }
 
 // =====================================================================
