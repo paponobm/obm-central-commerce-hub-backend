@@ -168,6 +168,14 @@ export class UsersService {
           passwordHash,
           roleId: dto.roleId,
           isActive: dto.isActive ?? true,
+          avatarUrl: dto.avatarUrl,
+          phone: dto.phone,
+          employeeCode: dto.employeeCode,
+          gender: dto.gender,
+          joiningDate: dto.joiningDate ? new Date(dto.joiningDate) : undefined,
+          shift: dto.shift,
+          designation: dto.designation,
+          about: dto.about,
           channels: derivedChannelIds.length
             ? {
                 createMany: {
@@ -333,6 +341,14 @@ export class UsersService {
             email: dto.email,
             roleId: dto.roleId,
             isActive: dto.isActive,
+            avatarUrl: dto.avatarUrl,
+            phone: dto.phone,
+            employeeCode: dto.employeeCode,
+            gender: dto.gender,
+            joiningDate: dto.joiningDate ? new Date(dto.joiningDate) : undefined,
+            shift: dto.shift,
+            designation: dto.designation,
+            about: dto.about,
             ...(passwordHash ? { passwordHash } : {}),
           },
           include: {
@@ -472,6 +488,14 @@ export class UsersService {
     email: string;
     isActive: boolean;
     createdAt: Date;
+    avatarUrl: string | null;
+    phone: string | null;
+    employeeCode: string | null;
+    gender: string | null;
+    joiningDate: Date | null;
+    shift: string | null;
+    designation: string | null;
+    about: string | null;
     role: { id: string; name: string };
     channels: { channelId: string }[];
     permissions: { permission: { key: string } }[];
@@ -491,6 +515,14 @@ export class UsersService {
       email: user.email,
       isActive: user.isActive,
       createdAt: user.createdAt,
+      avatarUrl: user.avatarUrl,
+      phone: user.phone,
+      employeeCode: user.employeeCode,
+      gender: user.gender,
+      joiningDate: user.joiningDate,
+      shift: user.shift,
+      designation: user.designation,
+      about: user.about,
       role: user.role,
       channelIds: user.channels.map((c) => c.channelId),
       // Flat union — "can this user do this ANYWHERE" — kept for the

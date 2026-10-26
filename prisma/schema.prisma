@@ -128,6 +128,17 @@ model User {
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
 
+  // Profile fields — optional, purely informational (not used by any
+  // auth/permission logic), shown on the New/Edit User form.
+  avatarUrl    String?
+  phone        String?
+  employeeCode String?
+  gender       String?
+  joiningDate  DateTime?
+  shift        String?
+  designation  String?
+  about        String?
+
   role Role @relation(fields: [roleId], references: [id])
 
   createdOrders       Order[]                 @relation("OrderCreatedBy")
