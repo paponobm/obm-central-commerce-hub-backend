@@ -235,6 +235,16 @@ export class UsersService {
       );
     }
 
+    // Granting/editing permissions & stores (the Access panel) is Super
+    // Admin only — an Admin can still edit a Manager/Member's own fields
+    // above (name, email, role within what they're allowed to assign,
+    // active flag), just not their access.
+    if (dto.permissions !== undefined && actorRoleName !== ROLE_SUPER_ADMIN) {
+      throw new ForbiddenException(
+        'Only a Super Admin can manage permissions & stores',
+      );
+    }
+
     let targetRoleName = existing.role.name;
     if (dto.roleId) {
       const targetRole = await this.prisma.role.findUnique({
@@ -384,6 +394,11 @@ export class UsersService {
       throw new ForbiddenException(
         "A Super Admin account can't be deleted here",
       );
+    }
+    // Deleting any account at all is Super Admin only — an Admin can
+    // create/edit a Manager/Member but not remove one.
+    if (actorRoleName !== ROLE_SUPER_ADMIN) {
+      throw new ForbiddenException('Only a Super Admin can delete a user');
     }
     if (!assignableRoleNames(actorRoleName).includes(existing.role.name)) {
       throw new ForbiddenException(

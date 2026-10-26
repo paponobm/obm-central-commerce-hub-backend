@@ -38,6 +38,16 @@ const PERMISSIONS: { key: string; label: string }[] = [
   // analytics on the Reports page, or vice versa).
   { key: 'dashboard.view', label: 'View dashboard' },
   { key: 'users.manage', label: 'Manage staff users & roles' },
+  // Nav-visibility-only — never checked by a route guard. Users/Roles/
+  // Settings pages (and their APIs) are still gated solely by users.manage
+  // above; these three just control which of the three links a given user
+  // sees in the sidebar, independent of each other. See UsersService's
+  // Access panel (users/page.tsx), which silently also grants users.manage
+  // whenever any one of these is granted, so the page itself still works
+  // if reached directly even when its own sidebar link is hidden.
+  { key: 'nav.users', label: 'Show "Users" in the sidebar' },
+  { key: 'nav.roles', label: 'Show "Roles" in the sidebar' },
+  { key: 'nav.settings', label: 'Show "Settings" in the sidebar' },
 ];
 
 // Only Super Admin has a fixed, role-wide permission set ('*' — every
