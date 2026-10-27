@@ -90,6 +90,26 @@ export class ReportsController {
     );
   }
 
+  @Get('order-report')
+  getOrderReport(
+    @CurrentUser() user: JwtPayload,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('channelId') channelId?: string,
+  ) {
+    return this.reportsService.getOrderReport(user, from, to, channelId);
+  }
+
+  @Get('cod-report')
+  getCodReport(
+    @CurrentUser() user: JwtPayload,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('channelId') channelId?: string,
+  ) {
+    return this.reportsService.getCodReport(user, from, to, channelId);
+  }
+
   @Get('stock-valuation')
   getStockValuation(
     @CurrentUser() user: JwtPayload,

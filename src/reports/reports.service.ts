@@ -412,6 +412,263 @@ export class ReportsService {
     };
   }
 
+  // The funnel from website traffic to fulfilled orders, exactly mirroring
+  // the Web Orders page's own definition of "web order" (an Order row with
+  // source=WEBSITE, approved or not, PLUS a CheckoutLead that never made it
+  // to an Order row at all — see OrdersService.listCheckoutLeads/findAll).
+  // "Approved" means the order has left the Web Orders queue and now shows
+  // in the main Order List: for a website order that's `webApprovedAt` being
+  // set; a non-website order needs no approval step, so its own `createdAt`
+  // plays that role. Every box below is additive from these two building
+  // blocks, matching the formulas the box layout is built from.
+  async getOrderReport(
+    user: JwtPayload,
+    from?: string,
+    to?: string,
+    channelId?: string,
+  ) {
+    const range = resolveDateRange(from, to);
+    const channelFilter = await this.channelScope.resolveDirectFilter(
+      user,
+      channelId,
+    );
+    const dateRange = { gte: range.gte, lte: range.lte };
+
+    const [
+      leads,
+      websiteOrders,
+      approvedFromWeb,
+      approvedOutsideWeb,
+      statusFromWeb,
+      statusOutsideWeb,
+    ] = await Promise.all([
+      this.prisma.checkoutLead.findMany({
+        where: { ...channelFilter, createdAt: dateRange },
+        select: { items: true },
+      }),
+      this.prisma.order.aggregate({
+        where: { ...channelFilter, source: 'WEBSITE', createdAt: dateRange },
+        _count: true,
+        _sum: { total: true },
+      }),
+      this.prisma.order.aggregate({
+        where: {
+          ...channelFilter,
+          source: 'WEBSITE',
+          webApprovedAt: dateRange,
+        },
+        _count: true,
+        _sum: { total: true },
+      }),
+      this.prisma.order.aggregate({
+        where: {
+          ...channelFilter,
+          source: { not: 'WEBSITE' },
+          createdAt: dateRange,
+        },
+        _count: true,
+        _sum: { total: true },
+      }),
+      this.prisma.order.groupBy({
+        by: ['status'],
+        where: {
+          ...channelFilter,
+          source: 'WEBSITE',
+          webApprovedAt: dateRange,
+        },
+        _count: true,
+        _sum: { total: true },
+      }),
+      this.prisma.order.groupBy({
+        by: ['status'],
+        where: {
+          ...channelFilter,
+          source: { not: 'WEBSITE' },
+          createdAt: dateRange,
+        },
+        _count: true,
+        _sum: { total: true },
+      }),
+    ]);
+
+    const leadAmount = leads.reduce((sum, lead) => {
+      const items = (lead.items ?? []) as {
+        quantity: number;
+        unitPrice: number;
+      }[];
+      return sum + items.reduce((s, i) => s + i.quantity * i.unitPrice, 0);
+    }, 0);
+
+    const fromWebsite = {
+      count: leads.length + websiteOrders._count,
+      amount: leadAmount + toNumber(websiteOrders._sum.total),
+    };
+    const approvedFromWebMetric = {
+      count: approvedFromWeb._count,
+      amount: toNumber(approvedFromWeb._sum.total),
+    };
+    const approvedOutsideWebMetric = {
+      count: approvedOutsideWeb._count,
+      amount: toNumber(approvedOutsideWeb._sum.total),
+    };
+    const totalIncoming = {
+      count: fromWebsite.count + approvedOutsideWebMetric.count,
+      amount: fromWebsite.amount + approvedOutsideWebMetric.amount,
+    };
+    const totalOrders = {
+      count: approvedFromWebMetric.count + approvedOutsideWebMetric.count,
+      amount: approvedFromWebMetric.amount + approvedOutsideWebMetric.amount,
+    };
+
+    const statusTotals = new Map<
+      OrderStatus,
+      { count: number; amount: number }
+    >();
+    for (const g of [...statusFromWeb, ...statusOutsideWeb]) {
+      const cur = statusTotals.get(g.status) ?? { count: 0, amount: 0 };
+      cur.count += g._count;
+      cur.amount += toNumber(g._sum.total);
+      statusTotals.set(g.status, cur);
+    }
+    const metric = (status: OrderStatus) =>
+      statusTotals.get(status) ?? { count: 0, amount: 0 };
+    const addMetrics = (
+      a: { count: number; amount: number },
+      b: { count: number; amount: number },
+    ) => ({ count: a.count + b.count, amount: a.amount + b.amount });
+
+    return {
+      range: { from: range.gte.toISOString(), to: range.lte.toISOString() },
+      totalIncoming,
+      fromWebsite,
+      approvedFromWeb: approvedFromWebMetric,
+      approvedOutsideWeb: approvedOutsideWebMetric,
+      totalOrders,
+      delivered: metric('DELIVERED'),
+      partial: metric('PARTIAL'),
+      cancelled: addMetrics(metric('CANCELLED'), metric('PENDING_CANCEL')),
+      returned: addMetrics(metric('RETURNED'), metric('PENDING_RETURN')),
+    };
+  }
+
+  // Steadfast never exposes a real per-parcel delivery charge anywhere in
+  // its API (checked /create_order, /status_by_cid, /payments — none carry
+  // one), so this is the known flat rate charged on every parcel they
+  // attempt, delivered or returned. The 1% COD handling fee is likewise
+  // not exposed by the API — it's computed here, not fetched.
+  private readonly STEADFAST_DELIVERY_CHARGE = 70;
+  private readonly STEADFAST_COD_CHARGE_RATE = 0.01;
+
+  // Compares what a customer was charged for delivery against what
+  // Steadfast actually cost to run that delivery (flat fee + COD cut) —
+  // scoped to orders actually booked through the Steadfast integration
+  // (Shipment.provider), since that's the only courier this comparison
+  // means anything for.
+  async getCodReport(
+    user: JwtPayload,
+    from?: string,
+    to?: string,
+    channelId?: string,
+  ) {
+    const range = resolveDateRange(from, to);
+    const channelFilter = await this.channelScope.resolveDirectFilter(
+      user,
+      channelId,
+    );
+    const dateRange = { gte: range.gte, lte: range.lte };
+    const scopeStatuses: OrderStatus[] = [
+      'DELIVERED',
+      'PENDING_RETURN',
+      'RETURNED',
+    ];
+
+    const [statusFromWeb, statusOutsideWeb, deliveredCod] = await Promise.all([
+      this.prisma.order.groupBy({
+        by: ['status'],
+        where: {
+          ...channelFilter,
+          source: 'WEBSITE',
+          webApprovedAt: dateRange,
+          status: { in: scopeStatuses },
+          shipment: { provider: 'STEADFAST' },
+        },
+        _count: true,
+        _sum: { shippingFee: true },
+      }),
+      this.prisma.order.groupBy({
+        by: ['status'],
+        where: {
+          ...channelFilter,
+          source: { not: 'WEBSITE' },
+          createdAt: dateRange,
+          status: { in: scopeStatuses },
+          shipment: { provider: 'STEADFAST' },
+        },
+        _count: true,
+        _sum: { shippingFee: true },
+      }),
+      // Only a DELIVERED parcel ever had COD money actually collected —
+      // a returned/pending-return one never hands Steadfast anything to
+      // take a 1% cut of.
+      this.prisma.shipment.aggregate({
+        where: {
+          provider: 'STEADFAST',
+          order: {
+            ...channelFilter,
+            status: 'DELIVERED',
+            OR: [
+              { source: 'WEBSITE', webApprovedAt: dateRange },
+              { source: { not: 'WEBSITE' }, createdAt: dateRange },
+            ],
+          },
+        },
+        _sum: { codAmount: true },
+      }),
+    ]);
+
+    const statusTotals = new Map<
+      OrderStatus,
+      { count: number; amount: number }
+    >();
+    for (const g of [...statusFromWeb, ...statusOutsideWeb]) {
+      const cur = statusTotals.get(g.status) ?? { count: 0, amount: 0 };
+      cur.count += g._count;
+      cur.amount += toNumber(g._sum.shippingFee);
+      statusTotals.set(g.status, cur);
+    }
+    const metric = (status: OrderStatus) =>
+      statusTotals.get(status) ?? { count: 0, amount: 0 };
+    const addMetrics = (
+      a: { count: number; amount: number },
+      b: { count: number; amount: number },
+    ) => ({ count: a.count + b.count, amount: a.amount + b.amount });
+
+    const delivered = metric('DELIVERED');
+    const returned = addMetrics(metric('RETURNED'), metric('PENDING_RETURN'));
+    const totalParcels = addMetrics(delivered, returned);
+
+    const deliveryChargeAmount =
+      totalParcels.count * this.STEADFAST_DELIVERY_CHARGE;
+    const codChargeAmount =
+      toNumber(deliveredCod._sum.codAmount) * this.STEADFAST_COD_CHARGE_RATE;
+
+    return {
+      range: { from: range.gte.toISOString(), to: range.lte.toISOString() },
+      totalParcels,
+      steadfastCharge: {
+        count: totalParcels.count,
+        amount: deliveryChargeAmount + codChargeAmount,
+      },
+      deliveryCharge: {
+        count: totalParcels.count,
+        amount: deliveryChargeAmount,
+      },
+      codCharge: { count: delivered.count, amount: codChargeAmount },
+      delivered,
+      returned,
+    };
+  }
+
   private fillStatusCounts(
     groups: { status: OrderStatus; _count: number }[],
   ): Record<OrderStatus, number> {
