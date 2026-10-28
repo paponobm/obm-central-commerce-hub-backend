@@ -36,6 +36,23 @@ export class ReportsController {
     return this.reportsService.getDashboard(user, channelId);
   }
 
+  // Dashboard-only, same permission override as getDashboard above.
+  @Get('hourly-web-orders')
+  @RequirePermissions('dashboard.view')
+  getHourlyWebOrders(
+    @CurrentUser() user: JwtPayload,
+    @Query('date') date?: string,
+    @Query('compareDate') compareDate?: string,
+    @Query('channelId') channelId?: string,
+  ) {
+    return this.reportsService.getHourlyWebOrders(
+      user,
+      date,
+      compareDate,
+      channelId,
+    );
+  }
+
   @Get('sales-by-channel')
   getSalesByChannel(
     @CurrentUser() user: JwtPayload,

@@ -47,6 +47,21 @@ interface PeriodSalesRow {
   salesTotal: string | null;
 }
 
+interface HourlyOrderRow {
+  day: Date;
+  hour: number;
+  count: bigint;
+}
+
+// Pure calendar-date arithmetic on a YYYY-MM-DD string — no timezone
+// conversion involved, just shifting the date part by one day, same as the
+// default "compare to yesterday" pairing shown on the chart.
+function dayBefore(dateStr: string): string {
+  const d = new Date(`${dateStr}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() - 1);
+  return d.toISOString().slice(0, 10);
+}
+
 @Injectable()
 export class ReportsService {
   constructor(
@@ -239,6 +254,55 @@ export class ReportsService {
     };
   }
 
+  // Hour-by-hour count of website-sourced orders for one day vs. a second
+  // day to compare against (defaults to the day right before it) — the
+  // Dashboard's "Hourly Web Orders" chart. Business-timezone aware, same
+  // convention as every other day-bucketed report here.
+  async getHourlyWebOrders(
+    user: JwtPayload,
+    date?: string,
+    compareDate?: string,
+    channelId?: string,
+  ) {
+    const day = date ?? businessToday();
+    const compareDay = compareDate ?? dayBefore(day);
+    const channelSql = await this.orderChannelSqlFragment(user, channelId);
+
+    const rows = await this.prisma.$queryRaw<HourlyOrderRow[]>`
+      SELECT
+        (("createdAt" AT TIME ZONE ${BUSINESS_TIMEZONE})::date) as day,
+        EXTRACT(HOUR FROM ("createdAt" AT TIME ZONE ${BUSINESS_TIMEZONE}))::int as hour,
+        COUNT(*) as count
+      FROM orders
+      WHERE source = 'WEBSITE'
+        AND (
+          (("createdAt" AT TIME ZONE ${BUSINESS_TIMEZONE})::date = ${day}::date)
+          OR (("createdAt" AT TIME ZONE ${BUSINESS_TIMEZONE})::date = ${compareDay}::date)
+        )
+        ${channelSql}
+      GROUP BY day, hour
+    `;
+
+    const current = new Array<number>(24).fill(0);
+    const previous = new Array<number>(24).fill(0);
+    for (const r of rows) {
+      const rowDay = r.day.toISOString().slice(0, 10);
+      const hour = Number(r.hour);
+      if (rowDay === day) current[hour] = Number(r.count);
+      else if (rowDay === compareDay) previous[hour] = Number(r.count);
+    }
+
+    return {
+      date: day,
+      compareDate: compareDay,
+      hours: current.map((count, hour) => ({
+        hour,
+        current: count,
+        previous: previous[hour],
+      })),
+    };
+  }
+
   // Revenue by channel over an arbitrary date range (business-timezone
   // aware — see common/business-date.util.ts). Distinct from the
   // dashboard's ordersByChannel, which intentionally includes cancelled
@@ -347,36 +411,61 @@ export class ReportsService {
       take: limit,
     });
 
-    const products = await this.prisma.product.findMany({
-      where: { id: { in: rows.map((r) => r.productId) } },
-      select: {
-        id: true,
-        sku: true,
-        name: true,
-        thumbnailUrl: true,
-        images: {
-          take: 1,
-          orderBy: { sortOrder: 'asc' },
-          select: { url: true },
+    const [products, returnedRows] = await Promise.all([
+      this.prisma.product.findMany({
+        where: { id: { in: rows.map((r) => r.productId) } },
+        select: {
+          id: true,
+          sku: true,
+          name: true,
+          thumbnailUrl: true,
+          images: {
+            take: 1,
+            orderBy: { sortOrder: 'asc' },
+            select: { url: true },
+          },
         },
-      },
-    });
+      }),
+      // Same window, same scope, just narrowed to the statuses that mean
+      // "came back" — Returned and the in-flight Pending Return, same
+      // pairing Order Report uses for its own "Returned" metric.
+      this.prisma.orderItem.groupBy({
+        by: ['productId'],
+        where: {
+          productId: { in: rows.map((r) => r.productId) },
+          order: {
+            ...orderWhere,
+            status: { in: ['RETURNED', 'PENDING_RETURN'] },
+            createdAt: { gte: range.gte, lte: range.lte },
+          },
+        },
+        _sum: { quantity: true },
+      }),
+    ]);
     const productById = new Map(products.map((p) => [p.id, p]));
+    const returnedByProduct = new Map(
+      returnedRows.map((r) => [r.productId, r._sum.quantity ?? 0]),
+    );
 
     return {
       range: { from: range.gte.toISOString(), to: range.lte.toISOString() },
       sortBy,
-      products: rows.map((r) => ({
-        productId: r.productId,
-        sku: productById.get(r.productId)?.sku ?? null,
-        name: productById.get(r.productId)?.name ?? 'Unknown product',
-        image:
-          productById.get(r.productId)?.thumbnailUrl ??
-          productById.get(r.productId)?.images[0]?.url ??
-          null,
-        quantitySold: r._sum.quantity ?? 0,
-        revenue: toNumber(r._sum.total),
-      })),
+      products: rows.map((r) => {
+        const sold = r._sum.quantity ?? 0;
+        const returned = returnedByProduct.get(r.productId) ?? 0;
+        return {
+          productId: r.productId,
+          sku: productById.get(r.productId)?.sku ?? null,
+          name: productById.get(r.productId)?.name ?? 'Unknown product',
+          image:
+            productById.get(r.productId)?.thumbnailUrl ??
+            productById.get(r.productId)?.images[0]?.url ??
+            null,
+          quantitySold: sold,
+          revenue: toNumber(r._sum.total),
+          returnPct: sold > 0 ? (returned / sold) * 100 : 0,
+        };
+      }),
     };
   }
 
