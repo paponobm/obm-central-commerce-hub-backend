@@ -90,6 +90,16 @@ export class ReportsController {
     );
   }
 
+  @Get('orders-summary')
+  getOrdersSummary(
+    @CurrentUser() user: JwtPayload,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('channelId') channelId?: string,
+  ) {
+    return this.reportsService.getOrdersSummary(user, from, to, channelId);
+  }
+
   @Get('order-report')
   getOrderReport(
     @CurrentUser() user: JwtPayload,

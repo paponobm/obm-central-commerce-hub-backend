@@ -416,6 +416,56 @@ export class ReportsService {
   // the Web Orders page's own definition of "web order" (an Order row with
   // source=WEBSITE, approved or not, PLUS a CheckoutLead that never made it
   // to an Order row at all — see OrdersService.listCheckoutLeads/findAll).
+  // Dashboard "Total Orders" card: a count of real orders (same rule as the
+  // main Order List — a website order still sitting unapproved in Web
+  // Orders doesn't count) over an arbitrary range, excluding
+  // CANCELLED/PENDING_CANCEL, plus the same count for the immediately
+  // preceding period of equal length, so the card can show a vs-previous
+  // delta for whatever range is selected.
+  async getOrdersSummary(
+    user: JwtPayload,
+    from?: string,
+    to?: string,
+    channelId?: string,
+  ) {
+    const range = resolveDateRange(from, to);
+    const channelFilter = await this.channelScope.resolveDirectFilter(
+      user,
+      channelId,
+    );
+
+    const spanMs = range.lte.getTime() - range.gte.getTime();
+    const previousTo = new Date(range.gte.getTime() - 1);
+    const previousFrom = new Date(previousTo.getTime() - spanMs);
+
+    const baseWhere: Prisma.OrderWhereInput = {
+      ...channelFilter,
+      status: { notIn: ['CANCELLED', 'PENDING_CANCEL'] },
+      OR: [
+        { source: { not: 'WEBSITE' } },
+        { source: 'WEBSITE', webApprovedAt: { not: null } },
+      ],
+    };
+
+    const [currentCount, previousCount] = await Promise.all([
+      this.prisma.order.count({
+        where: { ...baseWhere, createdAt: { gte: range.gte, lte: range.lte } },
+      }),
+      this.prisma.order.count({
+        where: {
+          ...baseWhere,
+          createdAt: { gte: previousFrom, lte: previousTo },
+        },
+      }),
+    ]);
+
+    return {
+      range: { from: range.gte.toISOString(), to: range.lte.toISOString() },
+      current: { count: currentCount },
+      previous: { count: previousCount },
+    };
+  }
+
   // "Approved" means the order has left the Web Orders queue and now shows
   // in the main Order List: for a website order that's `webApprovedAt` being
   // set; a non-website order needs no approval step, so its own `createdAt`
