@@ -1458,7 +1458,7 @@ export class OrdersService {
             channelId: dto.channelId ?? null,
             source: dto.source,
             customerId: customer.id,
-            status: 'PENDING',
+            status: dto.isPreorder ? 'PREORDER' : 'PENDING',
             paymentStatus,
             shipmentStatus: 'NOT_SHIPPED',
             subtotal,
@@ -1470,6 +1470,11 @@ export class OrdersService {
             shippingAddress,
             notes: dto.notes,
             deliveryMethod: dto.deliveryMethod,
+            preorderReason: dto.isPreorder ? (dto.preorderReason ?? null) : null,
+            preorderNotifyAt:
+              dto.isPreorder && dto.preorderNotifyAt
+                ? new Date(dto.preorderNotifyAt)
+                : null,
             createdById: actorUserId,
             items: {
               create: lineItems.map((li) => ({

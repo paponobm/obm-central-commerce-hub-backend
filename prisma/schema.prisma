@@ -522,14 +522,19 @@ model Order {
 
   // Shipping details are snapshotted onto the order (not FK'd to a live
   // Customer address) so editing a customer later never rewrites history.
-  shippingName    String
-  shippingPhone   String
-  shippingAddress String
-  notes           String?
+  shippingName     String
+  shippingPhone    String
+  shippingAddress  String
+  notes            String?
   // Informational only, set at order-creation time (before a Shipment even
   // exists) — e.g. "Steadfast", "Pathao". Distinct from Shipment.courierName,
   // which is set later, when the order actually ships.
-  deliveryMethod  String?
+  deliveryMethod   String?
+  // Only meaningful when status is PREORDER — set at order-creation time,
+  // both optional (see CreateOrderDto). Left on the row even after the
+  // order moves on to PENDING, as a record of why it started as a preorder.
+  preorderReason   String?
+  preorderNotifyAt DateTime?
 
   createdById   String? // staff user for MANUAL/PHONE/etc orders; null for WEBSITE
   // Set when a website order is approved from Web Orders; until then it is

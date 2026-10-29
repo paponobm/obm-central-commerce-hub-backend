@@ -3,6 +3,7 @@ import {
   ArrayMinSize,
   IsArray,
   IsBoolean,
+  IsDateString,
   IsEmail,
   IsEnum,
   IsNumber,
@@ -111,4 +112,19 @@ export class CreateOrderDto {
   @IsOptional()
   @IsString()
   transactionId?: string;
+
+  // true = the order starts life as PREORDER instead of PENDING (booked
+  // ahead of stock arriving — see the OrderStatus enum comment). Reason and
+  // notify-at are both optional even when this is true.
+  @IsOptional()
+  @IsBoolean()
+  isPreorder?: boolean;
+
+  @IsOptional()
+  @IsString()
+  preorderReason?: string;
+
+  @IsOptional()
+  @IsDateString()
+  preorderNotifyAt?: string;
 }
