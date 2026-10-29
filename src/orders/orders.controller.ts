@@ -9,6 +9,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import {
+  IntegrationProvider,
   OrderSource,
   OrderStatus,
   PaymentStatus,
@@ -31,6 +32,7 @@ import { UpdateCheckoutLeadDto } from './dto/update-checkout-lead.dto';
 import { CancelCheckoutLeadDto } from './dto/cancel-checkout-lead.dto';
 import { AddOrderNoteDto } from './dto/add-order-note.dto';
 import { CreateOrderShipmentDto } from './dto/create-order-shipment.dto';
+import { CreateScanEventDto } from './dto/create-scan-event.dto';
 
 @Controller('admin/orders')
 @UseGuards(JwtAuthGuard, PermissionsGuard)
@@ -76,6 +78,43 @@ export class OrdersController {
   @RequirePermissions('orders.view')
   listCheckoutLeads(@CurrentUser() user: JwtPayload) {
     return this.ordersService.listCheckoutLeads(user);
+  }
+
+  // Declared before ':id' for the same reason — 'by-number' has its own
+  // second path segment so it never collides with ':id' regardless, but
+  // this keeps every exact-path route grouped together above it.
+  @Get('by-number/:orderNumber')
+  @RequirePermissions('orders.view')
+  findByOrderNumber(
+    @Param('orderNumber') orderNumber: string,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.ordersService.findByOrderNumber(orderNumber, user);
+  }
+
+  // Declared before ':id' for the same reason as the two routes above.
+  @Get('scan-events')
+  @RequirePermissions('orders.view')
+  getScanHistory(
+    @CurrentUser() user: JwtPayload,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('provider') provider?: IntegrationProvider,
+    @Query('channelId') channelId?: string,
+  ) {
+    return this.ordersService.getScanHistory(user, from, to, provider, channelId);
+  }
+
+  // Posted by the Scan To Update page right after each scan attempt —
+  // gated on the same permission that performs the scan's actual status
+  // change, not just orders.view, since this is itself a write.
+  @Post('scan-events')
+  @RequirePermissions('orders.update_status')
+  recordScanEvent(
+    @Body() dto: CreateScanEventDto,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.ordersService.recordScanEvent(dto, user);
   }
 
   @Get(':id')

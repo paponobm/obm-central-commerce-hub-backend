@@ -14,9 +14,17 @@ const BUSINESS_TZ_OFFSET = '+06:00';
 // Today's date as YYYY-MM-DD in the business timezone, regardless of the
 // server's own system timezone.
 export function businessToday(): string {
+  return businessDateStr(new Date());
+}
+
+// Any instant -> its calendar date (YYYY-MM-DD) in the business timezone —
+// what groups a row into "which day" it belongs to for a report, same rule
+// as businessToday() but for an arbitrary row's own timestamp rather than
+// right now.
+export function businessDateStr(d: Date): string {
   return new Intl.DateTimeFormat('en-CA', {
     timeZone: BUSINESS_TIMEZONE,
-  }).format(new Date());
+  }).format(d);
 }
 
 // A YYYY-MM-DD calendar date string -> the UTC instant of that day's start

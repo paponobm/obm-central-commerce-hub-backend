@@ -311,9 +311,9 @@ model Category {
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
-  parent   Category?  @relation("CategoryTree", fields: [parentId], references: [id])
-  children Category[] @relation("CategoryTree")
-  products Product[]
+  parent            Category?         @relation("CategoryTree", fields: [parentId], references: [id])
+  children          Category[]        @relation("CategoryTree")
+  products          Product[]
   // Additional storefront categories a product can be tagged with, on top
   // of its one primary `categoryId` above — see ProductCategory.
   productCategories ProductCategory[]
@@ -338,25 +338,25 @@ model Brand {
 // SKU, cost, base price, stock link. Anything a storefront may override
 // lives on ProductChannel instead.
 model Product {
-  id          String    @id @default(cuid())
-  sku         String    @unique
-  name        String
-  description String?
-  costPrice   Decimal   @db.Decimal(12, 2)
-  basePrice   Decimal   @db.Decimal(12, 2) // fallback price if a channel doesn't override
-  unit        String    @default("pcs")
-  categoryId  String?
-  brandId     String?
+  id           String    @id @default(cuid())
+  sku          String    @unique
+  name         String
+  description  String?
+  costPrice    Decimal   @db.Decimal(12, 2)
+  basePrice    Decimal   @db.Decimal(12, 2) // fallback price if a channel doesn't override
+  unit         String    @default("pcs")
+  categoryId   String?
+  brandId      String?
   // The single image shown anywhere a product needs a small icon (order
   // lines, inventory, product lists) — distinct from `images` below, which
   // is the storefront's full photo gallery. Falls back to the gallery's
   // first image wherever it's read, so existing products don't go blank
   // until an admin explicitly sets one.
   thumbnailUrl String?
-  isActive    Boolean   @default(true)
-  deletedAt   DateTime?
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
+  isActive     Boolean   @default(true)
+  deletedAt    DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
 
   category Category? @relation(fields: [categoryId], references: [id])
   brand    Brand?    @relation(fields: [brandId], references: [id])
@@ -589,6 +589,40 @@ model OrderStatusHistory {
 
   @@index([orderId])
   @@map("order_status_history")
+}
+
+enum ScanMode {
+  RTS
+  SHIPPING
+  RETURN
+}
+
+// One row per Scan To Update attempt, success or failure — what the Scan
+// History page reads. Deliberately plain scalar references (no @relation)
+// rather than FKs onto Order/Channel/User: this is an append-only audit
+// trail that must still show what was scanned even on a miss (order not
+// found) or after the order/channel/user it pointed to is later gone, so a
+// resolvable relation would be the wrong shape here. orderNumber is
+// snapshotted at scan time for the same reason the order's own fields
+// aren't joined live.
+model ScanEvent {
+  id          String               @id @default(cuid())
+  mode        ScanMode
+  query       String // raw scanned/typed text, kept even when nothing matched
+  orderId     String?
+  orderNumber String?
+  fromStatus  OrderStatus?
+  toStatus    OrderStatus?
+  success     Boolean
+  message     String
+  channelId   String?
+  provider    IntegrationProvider?
+  scannedById String?
+  createdAt   DateTime             @default(now())
+
+  @@index([createdAt])
+  @@index([channelId])
+  @@map("scan_events")
 }
 
 // Who currently has a Web Order detail page open — Web Orders list &

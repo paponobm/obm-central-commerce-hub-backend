@@ -6,15 +6,18 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import {
+  IntegrationProvider,
   OrderSource,
   OrderStatus,
   PaymentStatus,
   Prisma,
+  ScanMode,
   ShipmentStatus,
 } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { runTransaction } from '../common/prisma-transaction.util';
 import { toNumber } from '../common/decimal.util';
+import { businessDateStr, resolveDateRange } from '../common/business-date.util';
 import {
   ALL_ACCESS_PERMISSION,
   ChannelScopeService,
@@ -32,6 +35,7 @@ import { RecordPaymentDto } from './dto/record-payment.dto';
 import { UpdatePaymentDto } from './dto/update-payment.dto';
 import { UpdateCheckoutLeadDto } from './dto/update-checkout-lead.dto';
 import { CancelCheckoutLeadDto } from './dto/cancel-checkout-lead.dto';
+import { CreateScanEventDto } from './dto/create-scan-event.dto';
 
 // The order lifecycle (ARCHITECTURE.md §7.2). Empty array = terminal state.
 // PENDING_CANCEL/PARTIAL/PENDING_RETURN/LOST/PREORDER are additive labels —
@@ -285,6 +289,180 @@ export class OrdersService {
         },
       };
     });
+  }
+
+  // Exact-match lookup by the human-readable order number (unique in the
+  // schema) — what Scan To Update resolves a barcode scan against. Kept
+  // separate from `search` (which does a `contains` match across several
+  // fields) since a scan needs a fast, unambiguous single-row result, not a
+  // fuzzy list. Returns the same shape as findAll's rows so the frontend
+  // can reuse OrderListItem for both.
+  async findByOrderNumber(orderNumber: string, user: JwtPayload) {
+    const channelFilter = await this.channelScope.resolveDirectFilter(user);
+    const order = await this.prisma.order.findFirst({
+      where: { ...channelFilter, orderNumber: orderNumber.trim() },
+      relationLoadStrategy: 'join',
+      include: {
+        customer: { select: { id: true, name: true, phone: true } },
+        channel: { select: { id: true, name: true, slug: true } },
+        createdBy: { select: { id: true, name: true } },
+        shipment: {
+          select: {
+            id: true,
+            provider: true,
+            status: true,
+            externalConsignmentId: true,
+          },
+        },
+        items: {
+          include: {
+            product: {
+              select: {
+                thumbnailUrl: true,
+                images: {
+                  take: 1,
+                  orderBy: { sortOrder: 'asc' },
+                  select: { url: true },
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+    if (!order) {
+      throw new NotFoundException(`No order found for "${orderNumber}"`);
+    }
+    const [stats, flags, adminNotes, lastActivity] = await Promise.all([
+      this.getCustomerStats([order.customerId]),
+      this.getAuditFlags([order.id], [
+        'order.invoice_printed',
+        'order.web_approved',
+      ]),
+      this.getAdminNotes([order.id]),
+      this.getLastOrderActivity([order.id]),
+    ]);
+    const orderFlags = flags.get(order.id);
+    return {
+      ...order,
+      invoicePrinted: orderFlags?.has('order.invoice_printed') ?? false,
+      webApproved: orderFlags?.has('order.web_approved') ?? false,
+      adminNotes: adminNotes.get(order.id) ?? [],
+      lastUpdate: lastActivity.get(order.id) ?? { at: order.updatedAt, by: null },
+      customer: {
+        ...order.customer,
+        successRate: stats.get(order.customerId)?.successRate ?? null,
+        orderCount: stats.get(order.customerId)?.orderCount ?? 0,
+      },
+    };
+  }
+
+  // Records one Scan To Update attempt — success or failure — for the Scan
+  // History page. Deliberately not transactional with the status-update
+  // call that precedes it (the frontend already did the lookup + PATCH
+  // chain itself): a scan that changed the order but somehow failed to log
+  // should never roll back real inventory/status work just to keep this
+  // audit trail complete.
+  async recordScanEvent(dto: CreateScanEventDto, user: JwtPayload) {
+    return this.prisma.scanEvent.create({
+      data: {
+        mode: dto.mode,
+        query: dto.query,
+        orderId: dto.orderId,
+        orderNumber: dto.orderNumber,
+        fromStatus: dto.fromStatus,
+        toStatus: dto.toStatus,
+        success: dto.success,
+        message: dto.message,
+        channelId: dto.channelId,
+        provider: dto.provider,
+        scannedById: user.sub,
+      },
+      select: { id: true },
+    });
+  }
+
+  // Scan History — one card per day, aggregate counts plus a breakdown of
+  // which (mode, from status, to status) transitions actually happened
+  // that day. Grouped in application code rather than a raw SQL GROUP BY:
+  // scan volume is human-paced (nothing like order/product catalog scale),
+  // so this stays simple and type-safe instead of hand-writing SQL for a
+  // three-column group-by, unlike the dashboard's day-bucketed charts.
+  async getScanHistory(
+    user: JwtPayload,
+    from?: string,
+    to?: string,
+    provider?: IntegrationProvider,
+    channelId?: string,
+  ) {
+    const range = resolveDateRange(from, to, 30);
+    const channelFilter = await this.channelScope.resolveDirectFilter(
+      user,
+      channelId,
+    );
+    const events = await this.prisma.scanEvent.findMany({
+      where: {
+        ...channelFilter,
+        createdAt: { gte: range.gte, lte: range.lte },
+        ...(provider ? { provider } : {}),
+      },
+      orderBy: { createdAt: 'desc' },
+      select: {
+        mode: true,
+        fromStatus: true,
+        toStatus: true,
+        success: true,
+        createdAt: true,
+      },
+    });
+
+    type Row = {
+      mode: ScanMode;
+      fromStatus: OrderStatus | null;
+      toStatus: OrderStatus | null;
+      parcels: number;
+    };
+    type Day = {
+      date: string;
+      scanned: number;
+      updated: number;
+      failed: number;
+      rows: Map<string, Row>;
+    };
+    const byDay = new Map<string, Day>();
+    for (const e of events) {
+      const date = businessDateStr(e.createdAt);
+      let day = byDay.get(date);
+      if (!day) {
+        day = { date, scanned: 0, updated: 0, failed: 0, rows: new Map() };
+        byDay.set(date, day);
+      }
+      day.scanned++;
+      if (e.success) {
+        day.updated++;
+        const key = `${e.mode}:${e.fromStatus}:${e.toStatus}`;
+        const row = day.rows.get(key) ?? {
+          mode: e.mode,
+          fromStatus: e.fromStatus,
+          toStatus: e.toStatus,
+          parcels: 0,
+        };
+        row.parcels++;
+        day.rows.set(key, row);
+      } else {
+        day.failed++;
+      }
+    }
+
+    return Array.from(byDay.values())
+      .sort((a, b) => b.date.localeCompare(a.date))
+      .map((d) => ({
+        date: d.date,
+        scanned: d.scanned,
+        updated: d.updated,
+        failed: d.failed,
+        rows: Array.from(d.rows.values()).sort((a, b) => b.parcels - a.parcels),
+      }));
   }
 
   private async getAuditedOrderIds(
