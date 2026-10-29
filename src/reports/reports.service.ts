@@ -1,5 +1,5 @@
 import { ForbiddenException, Injectable } from '@nestjs/common';
-import { OrderStatus, Prisma } from '@prisma/client';
+import { OrderSource, OrderStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { InventoryService } from '../inventory/inventory.service';
 import { toNumber } from '../common/decimal.util';
@@ -25,6 +25,21 @@ const ALL_STATUSES: OrderStatus[] = [
   'CANCELLED',
   'PREORDER',
   'LOST',
+];
+
+const ALL_SOURCES: OrderSource[] = [
+  'WEBSITE',
+  'MANUAL',
+  'FACEBOOK',
+  'PHONE',
+  'WHATSAPP',
+  'OTHER',
+  'UNKNOWN',
+  'DIRECT',
+  'INSTAGRAM',
+  'TIKTOK',
+  'EXCHANGE',
+  'MESSENGER',
 ];
 
 export type SalesPeriodUnit = 'day' | 'week' | 'month';
@@ -805,6 +820,138 @@ export class ReportsService {
       codCharge: { count: delivered.count, amount: codChargeAmount },
       delivered,
       returned,
+    };
+  }
+
+  // The same 11 statuses the Orders list's own tabs track (ALL_STATUSES
+  // minus CONFIRMED/PROCESSING, the two transient pipeline stages with no
+  // tab of their own — see PIPELINE_LABEL in the frontend's order-pipeline
+  // helper) — keeps this report's columns matching exactly what staff
+  // already see as the list's own status buckets.
+  private readonly EMPLOYEE_REPORT_STATUSES: OrderStatus[] = [
+    'PENDING',
+    'READY_TO_SHIP',
+    'SHIPPED',
+    'DELIVERED',
+    'PENDING_RETURN',
+    'RETURNED',
+    'PARTIAL',
+    'CANCELLED',
+    'PENDING_CANCEL',
+    'PREORDER',
+    'LOST',
+  ];
+
+  // One row per staff member who has created at least one order in range —
+  // their order count/total plus a breakdown across the same status buckets
+  // the Orders list itself uses. WEBSITE orders (createdById is always
+  // null — see Order.createdById's own comment) are excluded: this is a
+  // staff-performance report, and a website order was never "handled" by
+  // anyone to begin with.
+  async getEmployeeReport(
+    user: JwtPayload,
+    from?: string,
+    to?: string,
+    channelId?: string,
+  ) {
+    const range = resolveDateRange(from, to);
+    const channelFilter = await this.channelScope.resolveDirectFilter(
+      user,
+      channelId,
+    );
+    const where = {
+      ...channelFilter,
+      createdById: { not: null as string | null },
+      createdAt: { gte: range.gte, lte: range.lte },
+    };
+    // Order Status and Order Sources are the same underlying orders, just
+    // grouped a second way — both come back in one call so switching tabs
+    // on the frontend is instant, not a second round trip.
+    const [statusGroups, sourceGroups] = await Promise.all([
+      this.prisma.order.groupBy({
+        by: ['createdById', 'status'],
+        where,
+        _count: true,
+        _sum: { total: true },
+      }),
+      this.prisma.order.groupBy({
+        by: ['createdById', 'source'],
+        where,
+        _count: true,
+        _sum: { total: true },
+      }),
+    ]);
+
+    const employeeIds = [
+      ...new Set(
+        [...statusGroups, ...sourceGroups]
+          .map((g) => g.createdById)
+          .filter((id): id is string => !!id),
+      ),
+    ];
+    const users = await this.prisma.user.findMany({
+      where: { id: { in: employeeIds } },
+      select: { id: true, name: true },
+    });
+    const nameById = new Map(users.map((u) => [u.id, u.name]));
+
+    type Metric = { count: number; amount: number };
+    const byEmployee = new Map<
+      string,
+      {
+        id: string;
+        name: string;
+        total: Metric;
+        byStatus: Record<OrderStatus, Metric>;
+        bySource: Record<OrderSource, Metric>;
+      }
+    >();
+    const getEntry = (id: string) => {
+      let entry = byEmployee.get(id);
+      if (!entry) {
+        entry = {
+          id,
+          name: nameById.get(id) ?? 'Unknown',
+          total: { count: 0, amount: 0 },
+          byStatus: Object.fromEntries(
+            this.EMPLOYEE_REPORT_STATUSES.map((s) => [s, { count: 0, amount: 0 }]),
+          ) as Record<OrderStatus, Metric>,
+          bySource: Object.fromEntries(
+            ALL_SOURCES.map((s) => [s, { count: 0, amount: 0 }]),
+          ) as Record<OrderSource, Metric>,
+        };
+        byEmployee.set(id, entry);
+      }
+      return entry;
+    };
+
+    for (const g of statusGroups) {
+      const entry = getEntry(g.createdById as string);
+      const amount = toNumber(g._sum.total);
+      // The employee's own total is only tallied once (from the status
+      // pass, arbitrarily) — summing it again from sourceGroups would
+      // double it, since every order appears in both passes.
+      entry.total.count += g._count;
+      entry.total.amount += amount;
+      // CONFIRMED/PROCESSING rows (not in EMPLOYEE_REPORT_STATUSES) still
+      // count toward the employee's own total above; they just don't get
+      // their own column, same as the Orders list's own tabs.
+      if (g.status in entry.byStatus) {
+        entry.byStatus[g.status] = { count: g._count, amount };
+      }
+    }
+    for (const g of sourceGroups) {
+      const entry = getEntry(g.createdById as string);
+      entry.bySource[g.source] = { count: g._count, amount: toNumber(g._sum.total) };
+    }
+
+    return {
+      range: { from: range.gte.toISOString(), to: range.lte.toISOString() },
+      statuses: this.EMPLOYEE_REPORT_STATUSES,
+      sources: ALL_SOURCES,
+      employees: Array.from(byEmployee.values()).sort(
+        (a, b) => b.total.count - a.total.count,
+      ),
     };
   }
 

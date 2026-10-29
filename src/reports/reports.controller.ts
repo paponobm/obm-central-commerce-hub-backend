@@ -137,6 +137,16 @@ export class ReportsController {
     return this.reportsService.getCodReport(user, from, to, channelId);
   }
 
+  @Get('employee-report')
+  getEmployeeReport(
+    @CurrentUser() user: JwtPayload,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('channelId') channelId?: string,
+  ) {
+    return this.reportsService.getEmployeeReport(user, from, to, channelId);
+  }
+
   @Get('stock-valuation')
   getStockValuation(
     @CurrentUser() user: JwtPayload,
