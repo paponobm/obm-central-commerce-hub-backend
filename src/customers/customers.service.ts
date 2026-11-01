@@ -55,8 +55,14 @@ export class CustomersService {
   }
 
   async findAll(user: JwtPayload, search?: string, channelId?: string) {
-    const visible = await this.visibleWhere(user, channelId);
-    return this.prisma.customer.findMany({
+    const resolved = await this.channelScope.resolveDirectFilter(
+      user,
+      channelId,
+    );
+    const visible: Prisma.CustomerWhereInput = resolved.channelId
+      ? { orders: { some: { channelId: resolved.channelId } } }
+      : {};
+    const rows = await this.prisma.customer.findMany({
       where: {
         deletedAt: null,
         ...visible,
@@ -71,6 +77,65 @@ export class CustomersService {
       },
       orderBy: { createdAt: 'desc' },
     });
+    if (rows.length === 0) return [];
+
+    // "Repeat" counts by phone number (Order.shippingPhone), not by
+    // customerId — Order snapshots the phone at order time, so this stays
+    // correct even if a customer's phone is edited later or an order was
+    // placed under a different customer record that happens to share the
+    // same number. Scoped the same way as `visible` above — a restricted
+    // user's count must only reflect orders on their own assigned store(s).
+    const phones = rows.map((c) => c.phone);
+    const orderCountWhere: Prisma.OrderWhereInput = {
+      shippingPhone: { in: phones },
+      ...(resolved.channelId ? { channelId: resolved.channelId } : {}),
+    };
+    const [counts, totals, latestOrders] = await Promise.all([
+      this.prisma.order.groupBy({
+        by: ['shippingPhone'],
+        where: orderCountWhere,
+        _count: { _all: true },
+      }),
+      // Total spent excludes CANCELLED orders — same convention as the
+      // customer detail page's own stats.totalSpent.
+      this.prisma.order.groupBy({
+        by: ['shippingPhone'],
+        where: { ...orderCountWhere, status: { not: 'CANCELLED' } },
+        _sum: { total: true },
+      }),
+      // One row per phone (most recent order) gives both the fallback
+      // address (see below) and the "Reference" source badge in a single
+      // query — the New Order flow never writes either back onto the
+      // Customer record itself (ResolveCustomerInput has no address or
+      // source field), so a customer created that way would otherwise
+      // show blank forever despite every one of their orders having both.
+      this.prisma.order.findMany({
+        where: orderCountWhere,
+        orderBy: { createdAt: 'desc' },
+        select: { shippingPhone: true, shippingAddress: true, source: true },
+        distinct: ['shippingPhone'],
+      }),
+    ]);
+    const countByPhone = new Map(
+      counts.map((c) => [c.shippingPhone, c._count._all]),
+    );
+    const totalByPhone = new Map(
+      totals.map((t) => [t.shippingPhone, toNumber(t._sum.total ?? 0)]),
+    );
+    const addressByPhone = new Map<string, string>();
+    const sourceByPhone = new Map<string, string>();
+    for (const o of latestOrders) {
+      addressByPhone.set(o.shippingPhone, o.shippingAddress);
+      sourceByPhone.set(o.shippingPhone, o.source);
+    }
+
+    return rows.map((c) => ({
+      ...c,
+      address: c.address ?? addressByPhone.get(c.phone) ?? null,
+      orderCount: countByPhone.get(c.phone) ?? 0,
+      totalSpent: totalByPhone.get(c.phone) ?? 0,
+      lastSource: sourceByPhone.get(c.phone) ?? null,
+    }));
   }
 
   private async requireCustomer(id: string) {
@@ -116,8 +181,14 @@ export class CustomersService {
         createdAt: true,
         channelId: true,
         channel: { select: { id: true, name: true } },
+        shippingAddress: true,
+        source: true,
+        createdBy: { select: { name: true } },
       },
     });
+    const returnedCount = orders.filter((o) =>
+      ['RETURNED', 'PENDING_RETURN'].includes(o.status),
+    ).length;
 
     const counted = orders.filter((o) => o.status !== 'CANCELLED');
     const byChannel = new Map<
@@ -142,12 +213,22 @@ export class CustomersService {
       byChannel.set(key, row);
     }
 
+    const totalSpent = counted.reduce((sum, o) => sum + toNumber(o.total), 0);
+
     return {
       ...customer,
+      // Same fallback as the list page's findAll — the New Order flow never
+      // writes address/source back onto the Customer record itself, so a
+      // customer created that way would otherwise show blank here too.
+      address: customer.address ?? orders[0]?.shippingAddress ?? null,
+      lastSource: orders[0]?.source ?? null,
+      orderCount: orders.length,
+      totalSpent,
       stats: {
         totalOrders: orders.length,
-        totalSpent: counted.reduce((sum, o) => sum + toNumber(o.total), 0),
+        totalSpent,
         lastOrderAt: orders[0]?.createdAt ?? null,
+        returnedCount,
       },
       ordersByChannel: [...byChannel.values()].sort(
         (a, b) => b.orderCount - a.orderCount,
@@ -160,6 +241,7 @@ export class CustomersService {
         total: toNumber(o.total),
         createdAt: o.createdAt,
         channelName: o.channel?.name ?? 'No channel (manual)',
+        createdByName: o.createdBy?.name ?? null,
       })),
     };
   }
