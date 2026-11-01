@@ -3,6 +3,7 @@ import {
   Controller,
   Get,
   Param,
+  Patch,
   Post,
   Query,
   UseGuards,
@@ -15,6 +16,7 @@ import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { JwtPayload } from '../auth/types/jwt-payload.type';
 import { InventoryService } from './inventory.service';
 import { AdjustInventoryDto } from './dto/adjust-inventory.dto';
+import { UpdateThresholdDto } from './dto/update-threshold.dto';
 
 @Controller('admin/inventory')
 @UseGuards(JwtAuthGuard, PermissionsGuard, CentralOnlyGuard)
@@ -63,5 +65,17 @@ export class InventoryController {
     @CurrentUser() user: JwtPayload,
   ) {
     return this.inventoryService.adjust(productId, dto, user.sub);
+  }
+
+  @Patch(':productId/threshold')
+  @RequirePermissions('inventory.adjust')
+  updateThreshold(
+    @Param('productId') productId: string,
+    @Body() dto: UpdateThresholdDto,
+  ) {
+    return this.inventoryService.updateThreshold(
+      productId,
+      dto.lowStockThreshold,
+    );
   }
 }

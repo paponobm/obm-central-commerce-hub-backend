@@ -42,6 +42,7 @@ export class InventoryService {
             sku: true,
             name: true,
             thumbnailUrl: true,
+            isActive: true,
             images: { take: 1, orderBy: { sortOrder: 'asc' } },
           },
         },
@@ -54,6 +55,7 @@ export class InventoryService {
       sku: row.product.sku,
       name: row.product.name,
       imageUrl: row.product.thumbnailUrl ?? row.product.images[0]?.url ?? null,
+      isActive: row.product.isActive,
       currentStock: row.currentStock,
       reservedStock: row.reservedStock,
       availableStock: row.currentStock - row.reservedStock,
@@ -77,6 +79,7 @@ export class InventoryService {
             sku: true,
             name: true,
             thumbnailUrl: true,
+            isActive: true,
             images: { take: 1, orderBy: { sortOrder: 'asc' } },
           },
         },
@@ -92,6 +95,7 @@ export class InventoryService {
       sku: row.product.sku,
       name: row.product.name,
       imageUrl: row.product.thumbnailUrl ?? row.product.images[0]?.url ?? null,
+      isActive: row.product.isActive,
       currentStock: row.currentStock,
       reservedStock: row.reservedStock,
       availableStock: row.currentStock - row.reservedStock,
@@ -216,6 +220,18 @@ export class InventoryService {
         movement,
       };
     });
+  }
+
+  async updateThreshold(productId: string, lowStockThreshold: number) {
+    await this.assertInventoryExists(productId);
+    const row = await this.prisma.inventory.update({
+      where: { productId },
+      data: { lowStockThreshold },
+    });
+    return {
+      productId: row.productId,
+      lowStockThreshold: row.lowStockThreshold,
+    };
   }
 
   private async assertInventoryExists(productId: string) {
