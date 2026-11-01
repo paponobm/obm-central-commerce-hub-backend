@@ -8,6 +8,8 @@ import {
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { toNumber } from '../common/decimal.util';
+import { detectDistrict } from '../common/bd-districts.util';
+import { detectThana } from '../common/bd-thanas.util';
 import {
   ALL_ACCESS_PERMISSION,
   ChannelScopeService,
@@ -136,6 +138,218 @@ export class CustomersService {
       totalSpent: totalByPhone.get(c.phone) ?? 0,
       lastSource: sourceByPhone.get(c.phone) ?? null,
     }));
+  }
+
+  // Bulk "Auto-detect Districts" action — scans every visible customer that
+  // doesn't already have a district (an existing value is never
+  // overwritten, whether it was set by a previous detection run or typed
+  // in manually), resolves the same effective address findAll shows
+  // (customer.address, falling back to their most recent order's
+  // shippingAddress), and persists whatever BD_DISTRICTS matches. An
+  // address that matches nothing stays null — never a guess.
+  async detectDistricts(user: JwtPayload, channelId?: string) {
+    const resolved = await this.channelScope.resolveDirectFilter(
+      user,
+      channelId,
+    );
+    const visible: Prisma.CustomerWhereInput = resolved.channelId
+      ? { orders: { some: { channelId: resolved.channelId } } }
+      : {};
+    const candidates = await this.prisma.customer.findMany({
+      where: { deletedAt: null, district: null, ...visible },
+      select: { id: true, phone: true, address: true },
+    });
+    if (candidates.length === 0) {
+      return { scanned: 0, updated: 0, unmatched: 0 };
+    }
+
+    const phonesMissingAddress = candidates
+      .filter((c) => !c.address)
+      .map((c) => c.phone);
+    const addressByPhone = new Map<string, string>();
+    if (phonesMissingAddress.length > 0) {
+      const latestOrders = await this.prisma.order.findMany({
+        where: {
+          shippingPhone: { in: phonesMissingAddress },
+          ...(resolved.channelId ? { channelId: resolved.channelId } : {}),
+        },
+        orderBy: { createdAt: 'desc' },
+        select: { shippingPhone: true, shippingAddress: true },
+        distinct: ['shippingPhone'],
+      });
+      for (const o of latestOrders) {
+        addressByPhone.set(o.shippingPhone, o.shippingAddress);
+      }
+    }
+
+    const updates: { id: string; district: string }[] = [];
+    for (const c of candidates) {
+      const effectiveAddress = c.address ?? addressByPhone.get(c.phone) ?? null;
+      const district = detectDistrict(effectiveAddress);
+      if (district) updates.push({ id: c.id, district });
+    }
+
+    if (updates.length > 0) {
+      await this.prisma.$transaction(
+        updates.map((u) =>
+          this.prisma.customer.update({
+            where: { id: u.id },
+            data: { district: u.district },
+          }),
+        ),
+      );
+    }
+
+    return {
+      scanned: candidates.length,
+      updated: updates.length,
+      unmatched: candidates.length - updates.length,
+    };
+  }
+
+  // Same shape as detectDistricts, one level down — only ever runs on
+  // customers that already have a district (detectThana is scoped to one
+  // district's own thanas; see bd-thanas.util.ts for why). `district`
+  // narrows a run to just that district (the Thana Breakdown modal's own
+  // "Auto-fill Thana" button); omitted, it sweeps every district at once
+  // (the page-level "Auto-fill All Thanas" action).
+  async detectThanas(user: JwtPayload, channelId?: string, district?: string) {
+    const resolved = await this.channelScope.resolveDirectFilter(
+      user,
+      channelId,
+    );
+    const visible: Prisma.CustomerWhereInput = resolved.channelId
+      ? { orders: { some: { channelId: resolved.channelId } } }
+      : {};
+    const candidates = await this.prisma.customer.findMany({
+      where: {
+        deletedAt: null,
+        thana: null,
+        district: district ?? { not: null },
+        ...visible,
+      },
+      select: { id: true, phone: true, address: true, district: true },
+    });
+    if (candidates.length === 0) {
+      return { scanned: 0, updated: 0, unmatched: 0 };
+    }
+
+    const phonesMissingAddress = candidates
+      .filter((c) => !c.address)
+      .map((c) => c.phone);
+    const addressByPhone = new Map<string, string>();
+    if (phonesMissingAddress.length > 0) {
+      const latestOrders = await this.prisma.order.findMany({
+        where: {
+          shippingPhone: { in: phonesMissingAddress },
+          ...(resolved.channelId ? { channelId: resolved.channelId } : {}),
+        },
+        orderBy: { createdAt: 'desc' },
+        select: { shippingPhone: true, shippingAddress: true },
+        distinct: ['shippingPhone'],
+      });
+      for (const o of latestOrders) {
+        addressByPhone.set(o.shippingPhone, o.shippingAddress);
+      }
+    }
+
+    const updates: { id: string; thana: string }[] = [];
+    for (const c of candidates) {
+      const effectiveAddress = c.address ?? addressByPhone.get(c.phone) ?? null;
+      const thana = detectThana(effectiveAddress, c.district);
+      if (thana) updates.push({ id: c.id, thana });
+    }
+
+    if (updates.length > 0) {
+      await this.prisma.$transaction(
+        updates.map((u) =>
+          this.prisma.customer.update({
+            where: { id: u.id },
+            data: { thana: u.thana },
+          }),
+        ),
+      );
+    }
+
+    return {
+      scanned: candidates.length,
+      updated: updates.length,
+      unmatched: candidates.length - updates.length,
+    };
+  }
+
+  // Backs the "Thana Breakdown" modal — a single district's customers,
+  // orders and revenue, broken down by thana. Same visibility scoping and
+  // order-count/revenue conventions as findAll (count all orders by
+  // phone, sum total excluding CANCELLED).
+  async getThanaBreakdown(user: JwtPayload, district: string, channelId?: string) {
+    const resolved = await this.channelScope.resolveDirectFilter(
+      user,
+      channelId,
+    );
+    const visible: Prisma.CustomerWhereInput = resolved.channelId
+      ? { orders: { some: { channelId: resolved.channelId } } }
+      : {};
+    const rows = await this.prisma.customer.findMany({
+      where: { deletedAt: null, district, ...visible },
+      select: { phone: true, thana: true },
+    });
+    if (rows.length === 0) {
+      return { district, customers: 0, orders: 0, revenue: 0, withoutThana: 0, thanas: [] };
+    }
+
+    const phones = rows.map((r) => r.phone);
+    const orderWhere: Prisma.OrderWhereInput = {
+      shippingPhone: { in: phones },
+      ...(resolved.channelId ? { channelId: resolved.channelId } : {}),
+    };
+    const [counts, totals] = await Promise.all([
+      this.prisma.order.groupBy({
+        by: ['shippingPhone'],
+        where: orderWhere,
+        _count: { _all: true },
+      }),
+      this.prisma.order.groupBy({
+        by: ['shippingPhone'],
+        where: { ...orderWhere, status: { not: 'CANCELLED' } },
+        _sum: { total: true },
+      }),
+    ]);
+    const countByPhone = new Map(counts.map((c) => [c.shippingPhone, c._count._all]));
+    const totalByPhone = new Map(
+      totals.map((t) => [t.shippingPhone, toNumber(t._sum.total ?? 0)]),
+    );
+
+    const byThana = new Map<string, { customers: number; orders: number; revenue: number }>();
+    let withoutThana = 0;
+    let totalOrders = 0;
+    let totalRevenue = 0;
+    for (const r of rows) {
+      const orderCount = countByPhone.get(r.phone) ?? 0;
+      const revenue = totalByPhone.get(r.phone) ?? 0;
+      totalOrders += orderCount;
+      totalRevenue += revenue;
+      if (!r.thana) {
+        withoutThana += 1;
+        continue;
+      }
+      const entry = byThana.get(r.thana) ?? { customers: 0, orders: 0, revenue: 0 };
+      entry.customers += 1;
+      entry.orders += orderCount;
+      entry.revenue += revenue;
+      byThana.set(r.thana, entry);
+    }
+
+    return {
+      district,
+      customers: rows.length,
+      orders: totalOrders,
+      revenue: totalRevenue,
+      withoutThana,
+      thanas: Array.from(byThana.entries())
+        .map(([name, v]) => ({ name, ...v }))
+        .sort((a, b) => b.customers - a.customers),
+    };
   }
 
   private async requireCustomer(id: string) {

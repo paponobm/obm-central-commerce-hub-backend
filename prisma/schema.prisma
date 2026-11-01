@@ -493,6 +493,15 @@ model Customer {
   email     String?
   address   String?
   city      String?
+  // Bangladesh district (one of the 64) — never typed directly by an
+  // admin; either auto-detected by parsing `address`/the customer's most
+  // recent order shipping address (see CustomersService.detectDistricts),
+  // or set manually by editing the customer.
+  district  String?
+  // Thana/upazila (one of 544, see bd-thanas.util.ts) — only ever
+  // auto-detected, and only once `district` is already set (detection is
+  // scoped to that district's own thanas; see detectThana).
+  thana     String?
   notes     String?
   deletedAt DateTime?
   createdAt DateTime  @default(now())

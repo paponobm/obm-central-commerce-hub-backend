@@ -33,6 +33,37 @@ export class CustomersController {
     return this.customersService.findAll(user, search, channelId);
   }
 
+  // POST, not GET — declared before ':id' only for readability; no actual
+  // route collision since the methods differ.
+  @Post('detect-districts')
+  @RequirePermissions('customers.manage')
+  detectDistricts(
+    @CurrentUser() user: JwtPayload,
+    @Query('channelId') channelId?: string,
+  ) {
+    return this.customersService.detectDistricts(user, channelId);
+  }
+
+  @Post('detect-thanas')
+  @RequirePermissions('customers.manage')
+  detectThanas(
+    @CurrentUser() user: JwtPayload,
+    @Query('channelId') channelId?: string,
+    @Query('district') district?: string,
+  ) {
+    return this.customersService.detectThanas(user, channelId, district);
+  }
+
+  @Get('thana-breakdown')
+  @RequirePermissions('customers.view')
+  getThanaBreakdown(
+    @CurrentUser() user: JwtPayload,
+    @Query('district') district: string,
+    @Query('channelId') channelId?: string,
+  ) {
+    return this.customersService.getThanaBreakdown(user, district, channelId);
+  }
+
   @Get(':id')
   @RequirePermissions('customers.view')
   findOne(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
