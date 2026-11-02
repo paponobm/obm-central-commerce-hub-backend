@@ -36,6 +36,13 @@ export class StorefrontService {
     private readonly ordersService: OrdersService,
   ) {}
 
+  // Public-safe subset of the channel row — never the full record (no
+  // domain/themeConfig/soft-delete internals leaking to an unauthenticated
+  // storefront request).
+  getConfig(channel: Channel) {
+    return { name: channel.name, logoUrl: channel.logoUrl };
+  }
+
   // Categories are a shared, global taxonomy in this schema (not
   // channel-scoped) — every storefront sees the same category tree, filtered
   // to published ones via the admin's publish toggle.

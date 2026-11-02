@@ -23,6 +23,11 @@ import { StorefrontCheckoutLeadDto } from './dto/storefront-checkout-lead.dto';
 export class StorefrontController {
   constructor(private readonly storefrontService: StorefrontService) {}
 
+  @Get()
+  getConfig(@CurrentChannel() channel: Channel) {
+    return this.storefrontService.getConfig(channel);
+  }
+
   @Get('categories')
   getCategories() {
     return this.storefrontService.getCategories();
