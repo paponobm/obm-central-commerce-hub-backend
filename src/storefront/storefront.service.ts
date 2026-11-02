@@ -41,13 +41,31 @@ export class StorefrontService {
   // request). themeConfig itself is internal shape; only known, validated
   // sub-keys are ever surfaced, and only when their own enabled flag is set.
   getConfig(channel: Channel) {
+    type RawCoupon = { enabled: boolean; label: string; code: string };
     const theme = channel.themeConfig as {
-      heroCoupon?: { enabled: boolean; label: string; code: string };
+      heroCoupon?: RawCoupon;
+      heroSlides?: {
+        image: string;
+        title?: string;
+        description?: string;
+        coupon?: RawCoupon;
+      }[];
     } | null;
-    const heroCoupon = theme?.heroCoupon?.enabled
-      ? { label: theme.heroCoupon.label, code: theme.heroCoupon.code }
-      : null;
-    return { name: channel.name, logoUrl: channel.logoUrl, heroCoupon };
+
+    const toPublicCoupon = (c?: RawCoupon) =>
+      c?.enabled ? { label: c.label, code: c.code } : null;
+
+    return {
+      name: channel.name,
+      logoUrl: channel.logoUrl,
+      heroCoupon: toPublicCoupon(theme?.heroCoupon),
+      heroSlides: (theme?.heroSlides ?? []).map((s) => ({
+        image: s.image,
+        title: s.title || undefined,
+        description: s.description || undefined,
+        coupon: toPublicCoupon(s.coupon),
+      })),
+    };
   }
 
   // Categories are a shared, global taxonomy in this schema (not
