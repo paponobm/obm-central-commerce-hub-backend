@@ -37,10 +37,17 @@ export class StorefrontService {
   ) {}
 
   // Public-safe subset of the channel row — never the full record (no
-  // domain/themeConfig/soft-delete internals leaking to an unauthenticated
-  // storefront request).
+  // domain/soft-delete internals leaking to an unauthenticated storefront
+  // request). themeConfig itself is internal shape; only known, validated
+  // sub-keys are ever surfaced, and only when their own enabled flag is set.
   getConfig(channel: Channel) {
-    return { name: channel.name, logoUrl: channel.logoUrl };
+    const theme = channel.themeConfig as {
+      heroCoupon?: { enabled: boolean; label: string; code: string };
+    } | null;
+    const heroCoupon = theme?.heroCoupon?.enabled
+      ? { label: theme.heroCoupon.label, code: theme.heroCoupon.code }
+      : null;
+    return { name: channel.name, logoUrl: channel.logoUrl, heroCoupon };
   }
 
   // Categories are a shared, global taxonomy in this schema (not
@@ -276,7 +283,8 @@ export class StorefrontService {
       // The single cover image shown in listing cards, the cart, and as
       // the main product-page image — falls back to the gallery's first
       // shot for products that haven't had one set yet.
-      thumbnailUrl: pc.product.thumbnailUrl ?? pc.product.images[0]?.url ?? null,
+      thumbnailUrl:
+        pc.product.thumbnailUrl ?? pc.product.images[0]?.url ?? null,
       images: pc.product.images.map((i) => i.url),
       category: pc.product.category
         ? { id: pc.product.category.id, name: pc.product.category.name }

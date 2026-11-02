@@ -22,8 +22,13 @@ export class ChannelsService {
   ) {}
 
   async create(dto: CreateChannelDto) {
+    const { themeConfig, ...rest } = dto;
+    const data: Prisma.ChannelCreateInput = { ...rest };
+    if (themeConfig !== undefined) {
+      data.themeConfig = themeConfig as unknown as Prisma.InputJsonValue;
+    }
     return this.handleUniqueConstraints(() =>
-      this.prisma.channel.create({ data: dto }),
+      this.prisma.channel.create({ data }),
     );
   }
 
@@ -60,10 +65,10 @@ export class ChannelsService {
         _count: true,
       }),
     ]);
-    const productCounts = new Map(productRows.map((r) => [r.channelId, r._count]));
-    const orderCounts = new Map(
-      orderRows.map((r) => [r.channelId, r._count]),
+    const productCounts = new Map(
+      productRows.map((r) => [r.channelId, r._count]),
     );
+    const orderCounts = new Map(orderRows.map((r) => [r.channelId, r._count]));
 
     return channels.map((channel) => ({
       ...channel,
@@ -97,9 +102,22 @@ export class ChannelsService {
   }
 
   async update(id: string, dto: UpdateChannelDto, user: JwtPayload) {
-    await this.findOne(id, user);
+    const existing = await this.findOne(id, user);
+    const { themeConfig, ...rest } = dto;
+    const data: Prisma.ChannelUpdateInput = { ...rest };
+    // Merge, not replace — themeConfig will grow more sub-keys (banner,
+    // WhatsApp number, ...) over time, and a partial save here must not
+    // wipe sub-keys this request didn't touch.
+    if (themeConfig !== undefined) {
+      const existingConfig =
+        (existing.themeConfig as Prisma.JsonObject | null) ?? {};
+      data.themeConfig = {
+        ...existingConfig,
+        ...themeConfig,
+      } as Prisma.InputJsonValue;
+    }
     return this.handleUniqueConstraints(() =>
-      this.prisma.channel.update({ where: { id }, data: dto }),
+      this.prisma.channel.update({ where: { id }, data }),
     );
   }
 

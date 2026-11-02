@@ -5,7 +5,10 @@ import {
   Matches,
   MaxLength,
   MinLength,
+  ValidateNested,
 } from 'class-validator';
+import { Type } from 'class-transformer';
+import { ChannelThemeConfigDto } from './channel-theme-config.dto';
 
 export class CreateChannelDto {
   @IsString()
@@ -32,4 +35,9 @@ export class CreateChannelDto {
   @IsOptional()
   @IsBoolean()
   isActive?: boolean;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => ChannelThemeConfigDto)
+  themeConfig?: ChannelThemeConfigDto;
 }
