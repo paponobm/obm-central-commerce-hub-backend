@@ -2,11 +2,13 @@ import {
   ArrayMaxSize,
   IsArray,
   IsOptional,
+  IsString,
   ValidateNested,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 import { HeroCouponDto } from './hero-coupon.dto';
 import { HeroSlideDto } from './hero-slide.dto';
+import { TrustBadgeDto } from './trust-badge.dto';
 
 // Grows as more per-storefront cosmetic config lands (WhatsApp number,
 // etc.) — each a validated optional sub-object here, merged (not replaced)
@@ -28,4 +30,25 @@ export class ChannelThemeConfigDto {
   @ValidateNested({ each: true })
   @Type(() => HeroSlideDto)
   heroSlides?: HeroSlideDto[];
+
+  // The trust badges under the hero (e.g. "১০০% আসল পণ্য", delivery fee,
+  // free-delivery threshold) — admin-controlled text + an icon picked from
+  // TrustBadgeDto's fixed palette. Empty/omitted falls back to the
+  // storefront's own defaults.
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(10)
+  @ValidateNested({ each: true })
+  @Type(() => TrustBadgeDto)
+  trustBadges?: TrustBadgeDto[];
+
+  // Which of the shared, global categories (Category is not channel-scoped
+  // in this schema) this storefront's category grid/filters include.
+  // Omitted/empty means "no restriction" — every published category shows,
+  // matching the original behavior before this field existed.
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(50)
+  @IsString({ each: true })
+  categorySlugs?: string[];
 }

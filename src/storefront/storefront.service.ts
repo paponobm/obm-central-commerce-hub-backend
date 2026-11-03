@@ -42,6 +42,15 @@ export class StorefrontService {
   // sub-keys are ever surfaced, and only when their own enabled flag is set.
   getConfig(channel: Channel) {
     type RawCoupon = { enabled: boolean; label: string; code: string };
+    // Older saves stored trustBadges as plain strings (fixed 4 slots, no
+    // icon choice) or objects without an `enabled` flag yet; normalized
+    // below so a channel saved before an upgrade still renders correctly
+    // until it's saved again. Missing `enabled` defaults to on, matching
+    // pre-toggle behavior.
+    type RawTrustBadge =
+      | string
+      | { text?: string; icon?: string; enabled?: boolean };
+    const DEFAULT_ICONS = ['shield', 'cash', 'truck', 'clock'];
     const theme = channel.themeConfig as {
       heroCoupon?: RawCoupon;
       heroSlides?: {
@@ -50,10 +59,25 @@ export class StorefrontService {
         description?: string;
         coupon?: RawCoupon;
       }[];
+      trustBadges?: RawTrustBadge[];
     } | null;
 
     const toPublicCoupon = (c?: RawCoupon) =>
       c?.enabled ? { label: c.label, code: c.code } : null;
+
+    const trustBadges = (theme?.trustBadges ?? [])
+      .map((b, i) =>
+        typeof b === 'string'
+          ? { text: b, icon: DEFAULT_ICONS[i % DEFAULT_ICONS.length], enabled: true }
+          : {
+              text: b.text ?? '',
+              icon: b.icon ?? DEFAULT_ICONS[i % DEFAULT_ICONS.length],
+              enabled: b.enabled ?? true,
+            },
+      )
+      // Off badges never reach the storefront at all.
+      .filter((b) => b.text.trim() && b.enabled)
+      .map((b) => ({ text: b.text, icon: b.icon }));
 
     return {
       name: channel.name,
@@ -65,16 +89,27 @@ export class StorefrontService {
         description: s.description || undefined,
         coupon: toPublicCoupon(s.coupon),
       })),
+      trustBadges,
     };
   }
 
   // Categories are a shared, global taxonomy in this schema (not
   // channel-scoped) — every storefront sees the same category tree, filtered
-  // to published ones via the admin's publish toggle.
-  async getCategories() {
+  // to published ones via the admin's publish toggle. On top of that, a
+  // channel can optionally curate its own subset via
+  // themeConfig.categorySlugs (set from that channel's Settings page) —
+  // omitted/empty means no restriction, so channels that have never touched
+  // this (e.g. Online Burmese Market) keep seeing every published category.
+  async getCategories(channel: Channel) {
+    const theme = channel.themeConfig as { categorySlugs?: string[] } | null;
+    const slugs = theme?.categorySlugs;
     return this.prisma.category.findMany({
-      where: { deletedAt: null, isPublished: true },
-      select: { id: true, name: true, slug: true, parentId: true },
+      where: {
+        deletedAt: null,
+        isPublished: true,
+        ...(slugs && slugs.length > 0 ? { slug: { in: slugs } } : {}),
+      },
+      select: { id: true, name: true, slug: true, parentId: true, imageUrl: true },
       orderBy: { name: 'asc' },
     });
   }

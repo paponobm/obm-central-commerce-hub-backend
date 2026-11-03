@@ -29,8 +29,8 @@ export class StorefrontController {
   }
 
   @Get('categories')
-  getCategories() {
-    return this.storefrontService.getCategories();
+  getCategories(@CurrentChannel() channel: Channel) {
+    return this.storefrontService.getCategories(channel);
   }
 
   @Get('products')
