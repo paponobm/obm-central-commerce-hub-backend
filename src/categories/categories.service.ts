@@ -5,6 +5,8 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { unlink } from 'fs/promises';
+import { join } from 'path';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateCategoryDto } from './dto/create-category.dto';
 import { UpdateCategoryDto } from './dto/update-category.dto';
@@ -40,7 +42,7 @@ export class CategoriesService {
   }
 
   async update(id: string, dto: UpdateCategoryDto) {
-    await this.findOne(id);
+    const existing = await this.findOne(id);
 
     if (dto.parentId) {
       if (dto.parentId === id) {
@@ -50,13 +52,20 @@ export class CategoriesService {
       await this.assertNoCycle(id, dto.parentId);
     }
 
-    return this.handleUniqueConstraints(() =>
+    const updated = await this.handleUniqueConstraints(() =>
       this.prisma.category.update({ where: { id }, data: dto }),
     );
+    // A replaced (or cleared) image leaves its old file orphaned on disk
+    // otherwise — only once the swap has actually succeeded, and only the
+    // old file, never the new one.
+    if (dto.imageUrl !== undefined && dto.imageUrl !== existing.imageUrl) {
+      this.deleteUploadedFile(existing.imageUrl);
+    }
+    return updated;
   }
 
   async remove(id: string) {
-    await this.findOne(id);
+    const category = await this.findOne(id);
     const childCount = await this.prisma.category.count({
       where: { parentId: id, deletedAt: null },
     });
@@ -65,10 +74,24 @@ export class CategoriesService {
         'Cannot delete a category that still has subcategories',
       );
     }
-    return this.prisma.category.update({
+    const deleted = await this.prisma.category.update({
       where: { id },
       data: { deletedAt: new Date() },
     });
+    this.deleteUploadedFile(category.imageUrl);
+    return deleted;
+  }
+
+  // Only ever deletes files this server itself controls (its own
+  // /uploads/ directory) — never follows an arbitrary external URL.
+  // Missing/already-gone files are silently ignored; this is best-effort
+  // disk cleanup, not something that should ever fail the request.
+  private deleteUploadedFile(imageUrl: string | null) {
+    if (!imageUrl) return;
+    const match = imageUrl.match(/\/uploads\/([^/?#]+)$/);
+    if (!match) return;
+    const filePath = join(process.cwd(), 'uploads', match[1]);
+    unlink(filePath).catch(() => undefined);
   }
 
   // Walk up from the proposed new parent; if we ever reach `id`, setting

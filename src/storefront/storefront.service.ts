@@ -103,7 +103,7 @@ export class StorefrontService {
   async getCategories(channel: Channel) {
     const theme = channel.themeConfig as { categorySlugs?: string[] } | null;
     const slugs = theme?.categorySlugs;
-    return this.prisma.category.findMany({
+    const categories = await this.prisma.category.findMany({
       where: {
         deletedAt: null,
         isPublished: true,
@@ -112,6 +112,16 @@ export class StorefrontService {
       select: { id: true, name: true, slug: true, parentId: true, imageUrl: true },
       orderBy: { name: 'asc' },
     });
+    if (slugs && slugs.length > 0) {
+      // Once a channel has explicitly ordered its categories (Settings →
+      // Badge & Category, drag/reorder), that order — not the alphabetical
+      // default — is what the storefront's category grid shows.
+      const order = new Map(slugs.map((s, i) => [s, i]));
+      categories.sort(
+        (a, b) => (order.get(a.slug) ?? 0) - (order.get(b.slug) ?? 0),
+      );
+    }
+    return categories;
   }
 
   async getProducts(
