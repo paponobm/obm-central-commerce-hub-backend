@@ -57,6 +57,7 @@ export class StorefrontService {
       title?: string;
       description?: string;
       tiers?: RawComboTier[];
+      enabled?: boolean;
     };
     const theme = channel.themeConfig as {
       heroCoupon?: RawCoupon;
@@ -90,8 +91,10 @@ export class StorefrontService {
     // No hardcoded fallback — empty/omitted means no banner renders at all,
     // same honesty rule as trustBadges. Up to 2 (enforced on write by the
     // DTO; capped again here defensively).
+    // Off combos never reach the storefront at all — missing `enabled`
+    // defaults to on, matching pre-toggle behavior.
     const comboBanners = (theme?.comboBanners ?? [])
-      .filter((c) => c.title?.trim())
+      .filter((c) => c.title?.trim() && (c.enabled ?? true))
       .slice(0, 2)
       .map((c) => ({
         newBadge: c.newBadge ?? false,

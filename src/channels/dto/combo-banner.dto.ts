@@ -44,4 +44,9 @@ export class ComboBannerDto {
   @ValidateNested({ each: true })
   @Type(() => ComboTierDto)
   tiers: ComboTierDto[];
+
+  // Off combos stay in the admin's list (so they can be re-enabled) but are
+  // never shown on the storefront — same convention as trust badges/tiers.
+  @IsBoolean()
+  enabled: boolean;
 }
