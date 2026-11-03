@@ -9,6 +9,7 @@ import { Type } from 'class-transformer';
 import { HeroCouponDto } from './hero-coupon.dto';
 import { HeroSlideDto } from './hero-slide.dto';
 import { TrustBadgeDto } from './trust-badge.dto';
+import { ComboBannerDto } from './combo-banner.dto';
 
 // Grows as more per-storefront cosmetic config lands (WhatsApp number,
 // etc.) — each a validated optional sub-object here, merged (not replaced)
@@ -51,4 +52,13 @@ export class ChannelThemeConfigDto {
   @ArrayMaxSize(50)
   @IsString({ each: true })
   categorySlugs?: string[];
+
+  // The homepage "Build your own combo" promo banner — admin-controlled
+  // title/description, the "নতুন" badge toggle, and its pricing-tier cards.
+  // Omitted entirely means the banner doesn't render at all (no hardcoded
+  // fallback — see StorefrontService.getConfig).
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => ComboBannerDto)
+  comboBanner?: ComboBannerDto;
 }

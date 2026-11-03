@@ -51,6 +51,13 @@ export class StorefrontService {
       | string
       | { text?: string; icon?: string; enabled?: boolean };
     const DEFAULT_ICONS = ['shield', 'cash', 'truck', 'clock'];
+    type RawComboTier = { title?: string; description?: string; enabled?: boolean };
+    type RawComboBanner = {
+      newBadge?: boolean;
+      title?: string;
+      description?: string;
+      tiers?: RawComboTier[];
+    };
     const theme = channel.themeConfig as {
       heroCoupon?: RawCoupon;
       heroSlides?: {
@@ -60,6 +67,7 @@ export class StorefrontService {
         coupon?: RawCoupon;
       }[];
       trustBadges?: RawTrustBadge[];
+      comboBanner?: RawComboBanner;
     } | null;
 
     const toPublicCoupon = (c?: RawCoupon) =>
@@ -79,6 +87,19 @@ export class StorefrontService {
       .filter((b) => b.text.trim() && b.enabled)
       .map((b) => ({ text: b.text, icon: b.icon }));
 
+    // No hardcoded fallback — omitted means the banner doesn't render at
+    // all, same honesty rule as trustBadges.
+    const comboBanner = theme?.comboBanner
+      ? {
+          newBadge: theme.comboBanner.newBadge ?? false,
+          title: theme.comboBanner.title ?? '',
+          description: theme.comboBanner.description ?? '',
+          tiers: (theme.comboBanner.tiers ?? [])
+            .filter((t) => t.enabled && t.title?.trim())
+            .map((t) => ({ title: t.title ?? '', description: t.description ?? '' })),
+        }
+      : null;
+
     return {
       name: channel.name,
       logoUrl: channel.logoUrl,
@@ -90,6 +111,7 @@ export class StorefrontService {
         coupon: toPublicCoupon(s.coupon),
       })),
       trustBadges,
+      comboBanner,
     };
   }
 
