@@ -53,12 +53,15 @@ export class ChannelThemeConfigDto {
   @IsString({ each: true })
   categorySlugs?: string[];
 
-  // The homepage "Build your own combo" promo banner — admin-controlled
-  // title/description, the "নতুন" badge toggle, and its pricing-tier cards.
-  // Omitted entirely means the banner doesn't render at all (no hardcoded
+  // The homepage "Build your own combo" promo banner(s) — admin-controlled
+  // title/description, the "নতুন" badge toggle, and pricing-tier cards, up
+  // to 2 separate combos (shown side by side on larger screens once there
+  // are 2). Omitted/empty means no banner renders at all (no hardcoded
   // fallback — see StorefrontService.getConfig).
   @IsOptional()
-  @ValidateNested()
+  @IsArray()
+  @ArrayMaxSize(2)
+  @ValidateNested({ each: true })
   @Type(() => ComboBannerDto)
-  comboBanner?: ComboBannerDto;
+  comboBanners?: ComboBannerDto[];
 }

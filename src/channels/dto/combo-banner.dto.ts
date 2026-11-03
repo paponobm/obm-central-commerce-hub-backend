@@ -15,8 +15,9 @@ export class ComboTierDto {
   @MaxLength(60)
   title: string;
 
+  // Multi-line — the storefront renders each \n as its own line in the card.
   @IsString()
-  @MaxLength(80)
+  @MaxLength(160)
   description: string;
 
   // Off tiers stay in the admin's list (so they can be re-enabled) but are

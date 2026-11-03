@@ -67,7 +67,7 @@ export class StorefrontService {
         coupon?: RawCoupon;
       }[];
       trustBadges?: RawTrustBadge[];
-      comboBanner?: RawComboBanner;
+      comboBanners?: RawComboBanner[];
     } | null;
 
     const toPublicCoupon = (c?: RawCoupon) =>
@@ -87,18 +87,20 @@ export class StorefrontService {
       .filter((b) => b.text.trim() && b.enabled)
       .map((b) => ({ text: b.text, icon: b.icon }));
 
-    // No hardcoded fallback — omitted means the banner doesn't render at
-    // all, same honesty rule as trustBadges.
-    const comboBanner = theme?.comboBanner
-      ? {
-          newBadge: theme.comboBanner.newBadge ?? false,
-          title: theme.comboBanner.title ?? '',
-          description: theme.comboBanner.description ?? '',
-          tiers: (theme.comboBanner.tiers ?? [])
-            .filter((t) => t.enabled && t.title?.trim())
-            .map((t) => ({ title: t.title ?? '', description: t.description ?? '' })),
-        }
-      : null;
+    // No hardcoded fallback — empty/omitted means no banner renders at all,
+    // same honesty rule as trustBadges. Up to 2 (enforced on write by the
+    // DTO; capped again here defensively).
+    const comboBanners = (theme?.comboBanners ?? [])
+      .filter((c) => c.title?.trim())
+      .slice(0, 2)
+      .map((c) => ({
+        newBadge: c.newBadge ?? false,
+        title: c.title ?? '',
+        description: c.description ?? '',
+        tiers: (c.tiers ?? [])
+          .filter((t) => t.enabled && t.title?.trim())
+          .map((t) => ({ title: t.title ?? '', description: t.description ?? '' })),
+      }));
 
     return {
       name: channel.name,
@@ -111,7 +113,7 @@ export class StorefrontService {
         coupon: toPublicCoupon(s.coupon),
       })),
       trustBadges,
-      comboBanner,
+      comboBanners,
     };
   }
 
