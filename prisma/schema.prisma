@@ -346,12 +346,41 @@ model Product {
   id           String    @id @default(cuid())
   sku          String    @unique
   name         String
+  // Short, punchy line shown under the name (storefront product card/page).
+  slogan       String?
+  // One or two sentences — storefront product card. `description` below is
+  // the long-form body on the product detail page; this is deliberately
+  // separate so a card doesn't have to truncate the full description.
+  shortDescription String?
+  // Rich-text body (HTML, from the New/Edit Product page's editor) — the
+  // long-form section on the product detail page.
   description  String?
+  // Optional, globally-unique, admin-chosen URL slug — the default used
+  // when publishing to a channel that doesn't already have its own
+  // ProductChannel.slug override. Product itself has no public URL; this
+  // exists purely as that shared default (see ProductsService.create).
+  slug         String?   @unique
+  // Free-form key/value rows (e.g. "Origin" → "কক্সবাজার") shown as a
+  // specs table on the product detail page. [{ key, value }, ...].
+  specifications Json?
   costPrice    Decimal   @db.Decimal(12, 2)
   basePrice    Decimal   @db.Decimal(12, 2) // fallback price if a channel doesn't override
+  // Optional lower "sale" price shown struck-through against basePrice —
+  // only meaningful for a single-variant product (hasVariants: false); a
+  // variant product's discount lives per-row on ProductVariant instead.
+  compareAtPrice Decimal? @db.Decimal(12, 2)
   unit         String    @default("pcs")
+  // Free-text country of origin (e.g. "Bangladesh", "China") — the New
+  // Product form offers a dropdown of common choices plus a custom entry,
+  // but nothing here constrains the value.
+  importCountry String?
   categoryId   String?
   brandId      String?
+  // true = this product's real sellable units are its ProductVariant rows
+  // (own sku/price/stock each); false = the master row above (sku,
+  // basePrice, compareAtPrice, the Inventory row) IS the one sellable unit.
+  // Existing products are unaffected — they're all `false`.
+  hasVariants  Boolean   @default(false)
   // The single image shown anywhere a product needs a small icon (order
   // lines, inventory, product lists) — distinct from `images` below, which
   // is the storefront's full photo gallery. Falls back to the gallery's
@@ -375,10 +404,49 @@ model Product {
   // Additional storefront categories, on top of the single `category`
   // above — lets a product show up on more than one category page.
   categories     ProductCategory[]
+  variants       ProductVariant[]
 
   @@index([categoryId])
   @@index([brandId])
   @@map("products")
+}
+
+// One sellable row of a `hasVariants: true` product — e.g. "Tiger Balm
+// 19.4g" vs "Tiger Balm 30g". Each has its own SKU and its own stock
+// count, kept here as a plain integer rather than through the
+// Inventory/StockMovement ledger: that ledger is wired to Order placement
+// at the single-Product granularity (OrderItem.productId, no variantId),
+// so variant stock here is the admin's own record, not yet deducted
+// automatically by a sale. The parent Product's Inventory.currentStock is
+// kept as the sum of all variant stocks, so existing stock-aware screens
+// (Inventory list, low-stock alerts, reports) still show a sane number for
+// a variant product without needing to know about variants themselves.
+model ProductVariant {
+  id             String    @id @default(cuid())
+  productId      String
+  sku            String    @unique
+  // e.g. "200ml", "400ml", "1/2 kg" — purely a label, no unit conversion.
+  unitLabel      String?
+  basePrice      Decimal   @db.Decimal(12, 2)
+  compareAtPrice Decimal?  @db.Decimal(12, 2)
+  stock          Int       @default(0)
+  sortOrder      Int       @default(0)
+  // A dedicated photo for this specific variant (e.g. the Gift Box
+  // packaging shot) — falls back to the parent Product's thumbnail/gallery
+  // wherever it's read, same fallback convention as Product.thumbnailUrl.
+  imageUrl       String?
+  // The variant pre-selected on the storefront's product page. Admin UI
+  // enforces at most one per product; nothing else assumes that here.
+  isDefault      Boolean   @default(false)
+  isActive       Boolean   @default(true)
+  deletedAt      DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([productId])
+  @@map("product_variants")
 }
 
 // Extra (product, category) tags beyond Product.categoryId — a product can

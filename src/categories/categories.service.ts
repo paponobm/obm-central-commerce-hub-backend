@@ -10,6 +10,7 @@ import { join } from 'path';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateCategoryDto } from './dto/create-category.dto';
 import { UpdateCategoryDto } from './dto/update-category.dto';
+import { SetCategoryChannelsDto } from './dto/set-category-channels.dto';
 
 @Injectable()
 export class CategoriesService {
@@ -80,6 +81,68 @@ export class CategoriesService {
     });
     this.deleteUploadedFile(category.imageUrl);
     return deleted;
+  }
+
+  // Which active channels this category is currently published to —
+  // themeConfig.categorySlugs is unset/empty (null here, materialized from
+  // either) when a channel is "unrestricted" (every published category
+  // shows), so inclusion there means "every published category, including
+  // this one" rather than an explicit listing. Mirrors
+  // StorefrontService.getCategories' own filter exactly.
+  async setCategoryChannels(id: string, dto: SetCategoryChannelsDto) {
+    const category = await this.findOne(id);
+    const channels = await this.prisma.channel.findMany({
+      where: { deletedAt: null, isActive: true },
+    });
+    const publishedSlugs = (
+      await this.prisma.category.findMany({
+        where: { deletedAt: null, isPublished: true },
+        select: { slug: true },
+      })
+    ).map((c) => c.slug);
+    const wanted = new Set(dto.channelIds);
+
+    const writes = channels
+      .map((channel) => {
+        const theme = (channel.themeConfig as Prisma.JsonObject | null) ?? {};
+        const existingSlugs =
+          (theme.categorySlugs as string[] | undefined) ?? null;
+        const currentlyIncluded =
+          existingSlugs === null ? true : existingSlugs.includes(category.slug);
+        const shouldInclude = wanted.has(channel.id);
+        if (currentlyIncluded === shouldInclude) return null;
+
+        let nextSlugs: string[];
+        if (shouldInclude) {
+          // Only reachable when existingSlugs is a real (restricted) array
+          // not yet containing this category — null already means included.
+          nextSlugs = [...(existingSlugs ?? []), category.slug];
+        } else if (existingSlugs === null) {
+          // Was unrestricted (every published category shown, this one
+          // included) — materialize the full current set minus this
+          // category, so every other category's visibility here is
+          // unaffected by this one category's publish state changing.
+          nextSlugs = publishedSlugs.filter((s) => s !== category.slug);
+        } else {
+          nextSlugs = existingSlugs.filter((s) => s !== category.slug);
+        }
+
+        return this.prisma.channel.update({
+          where: { id: channel.id },
+          data: {
+            themeConfig: {
+              ...theme,
+              categorySlugs: nextSlugs,
+            } as Prisma.InputJsonValue,
+          },
+        });
+      })
+      .filter((op): op is NonNullable<typeof op> => op !== null);
+
+    if (writes.length > 0) {
+      await this.prisma.$transaction(writes);
+    }
+    return { success: true };
   }
 
   // Only ever deletes files this server itself controls (its own

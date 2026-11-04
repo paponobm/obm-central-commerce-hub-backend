@@ -22,6 +22,8 @@ import { UpdateProductDto } from './dto/update-product.dto';
 import { AddProductImageDto } from './dto/add-product-image.dto';
 import { UpsertProductChannelDto } from './dto/upsert-product-channel.dto';
 import { SetProductCategoriesDto } from './dto/set-product-categories.dto';
+import { CreateProductVariantDto } from './dto/create-product-variant.dto';
+import { UpdateProductVariantDto } from './dto/update-product-variant.dto';
 
 @Controller('admin/products')
 @UseGuards(JwtAuthGuard, PermissionsGuard)
@@ -96,6 +98,37 @@ export class ProductsController {
     @CurrentUser() user: JwtPayload,
   ) {
     return this.productsService.removeImage(id, imageId, user);
+  }
+
+  @Post(':id/variants')
+  @RequirePermissions('products.manage')
+  addVariant(
+    @Param('id') id: string,
+    @Body() dto: CreateProductVariantDto,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.productsService.addVariant(id, dto, user);
+  }
+
+  @Patch(':id/variants/:variantId')
+  @RequirePermissions('products.manage')
+  updateVariant(
+    @Param('id') id: string,
+    @Param('variantId') variantId: string,
+    @Body() dto: UpdateProductVariantDto,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.productsService.updateVariant(id, variantId, dto, user);
+  }
+
+  @Delete(':id/variants/:variantId')
+  @RequirePermissions('products.manage')
+  removeVariant(
+    @Param('id') id: string,
+    @Param('variantId') variantId: string,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.productsService.removeVariant(id, variantId, user);
   }
 
   @Get(':id/channels')

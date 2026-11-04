@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { runTransaction } from '../common/prisma-transaction.util';
 import { slugify } from '../common/utils/slugify';
 import {
   ALL_ACCESS_PERMISSION,
@@ -18,6 +19,8 @@ import { UpdateProductDto } from './dto/update-product.dto';
 import { AddProductImageDto } from './dto/add-product-image.dto';
 import { UpsertProductChannelDto } from './dto/upsert-product-channel.dto';
 import { SetProductCategoriesDto } from './dto/set-product-categories.dto';
+import { CreateProductVariantDto } from './dto/create-product-variant.dto';
+import { UpdateProductVariantDto } from './dto/update-product-variant.dto';
 
 @Injectable()
 export class ProductsService {
@@ -77,21 +80,156 @@ export class ProductsService {
   }
 
   async create(dto: CreateProductDto) {
+    const {
+      variants,
+      channelIds,
+      categoryIds,
+      initialStock,
+      specifications,
+      ...productData
+    } = dto;
+    const createData: Prisma.ProductUncheckedCreateInput = {
+      ...productData,
+      ...(specifications !== undefined
+        ? { specifications: specifications as unknown as Prisma.InputJsonValue }
+        : {}),
+    };
+
+    // Validate every foreign reference up front — a stale id (e.g. a
+    // category removed in another tab after this form was opened) would
+    // otherwise fail deep inside the transaction below as a raw Prisma
+    // foreign-key error, surfacing to the admin as an unhelpful 500
+    // instead of a clear "not found".
+    if (productData.categoryId) {
+      const found = await this.prisma.category.count({
+        where: { id: productData.categoryId, deletedAt: null },
+      });
+      if (!found) {
+        throw new NotFoundException(
+          `Category ${productData.categoryId} not found`,
+        );
+      }
+    }
+    if (productData.brandId) {
+      const found = await this.prisma.brand.count({
+        where: { id: productData.brandId, deletedAt: null },
+      });
+      if (!found) {
+        throw new NotFoundException(`Brand ${productData.brandId} not found`);
+      }
+    }
+    if (categoryIds?.length) {
+      const uniqueIds = [...new Set(categoryIds)];
+      const found = await this.prisma.category.count({
+        where: { id: { in: uniqueIds }, deletedAt: null },
+      });
+      if (found !== uniqueIds.length) {
+        throw new NotFoundException('One or more categories were not found');
+      }
+    }
+    if (channelIds?.length) {
+      const uniqueIds = [...new Set(channelIds)];
+      const found = await this.prisma.channel.count({
+        where: { id: { in: uniqueIds }, deletedAt: null, isActive: true },
+      });
+      if (found !== uniqueIds.length) {
+        throw new NotFoundException(
+          'One or more channels were not found or are inactive',
+        );
+      }
+    }
+
     return this.handleUniqueConstraints(() =>
-      // A product and its (zero-stock) inventory row are created together —
-      // there is never a moment where a Product exists without an
-      // Inventory row to reserve/deduct against later.
+      // A product and its inventory row are created together — there is
+      // never a moment where a Product exists without an Inventory row to
+      // reserve/deduct against later.
       this.prisma.$transaction(async (tx) => {
         const { defaultLowStockThreshold } = await this.settings.get();
-        const product = await tx.product.create({ data: dto });
-        await tx.inventory.create({
+        const product = await tx.product.create({ data: createData });
+
+        if (variants?.length) {
+          // At most one default — the admin UI enforces this with a radio
+          // button, but a request sending more than one still only keeps
+          // the first rather than leaving an ambiguous multi-default state.
+          let defaultClaimed = false;
+          await tx.productVariant.createMany({
+            data: variants.map((v, i) => {
+              const isDefault = !!v.isDefault && !defaultClaimed;
+              if (isDefault) defaultClaimed = true;
+              return {
+                productId: product.id,
+                sku: v.sku,
+                unitLabel: v.unitLabel,
+                basePrice: v.basePrice,
+                compareAtPrice: v.compareAtPrice,
+                stock: v.stock ?? 0,
+                imageUrl: v.imageUrl,
+                isDefault,
+                sortOrder: i,
+              };
+            }),
+          });
+        }
+
+        // A variant product's real stock lives per-row above; the master
+        // Inventory row (still required — see Inventory.productId @unique)
+        // is kept as their sum so existing stock-aware screens stay correct
+        // without knowing about variants.
+        const startingStock = variants?.length
+          ? variants.reduce((sum, v) => sum + (v.stock ?? 0), 0)
+          : (initialStock ?? 0);
+
+        const inventory = await tx.inventory.create({
           data: {
             productId: product.id,
-            currentStock: 0,
+            currentStock: startingStock,
             reservedStock: 0,
             lowStockThreshold: defaultLowStockThreshold,
           },
         });
+
+        if (startingStock > 0) {
+          await tx.stockMovement.create({
+            data: {
+              productId: product.id,
+              type: 'ADJUSTMENT',
+              quantity: startingStock,
+              balanceAfter: inventory.currentStock,
+              referenceType: 'MANUAL_ADJUSTMENT',
+              note: 'Initial stock on product creation',
+            },
+          });
+        }
+
+        if (categoryIds?.length) {
+          const uniqueIds = [...new Set(categoryIds)];
+          await tx.productCategory.createMany({
+            data: uniqueIds.map((categoryId) => ({
+              productId: product.id,
+              categoryId,
+            })),
+            skipDuplicates: true,
+          });
+        }
+
+        if (channelIds?.length) {
+          for (const channelId of channelIds) {
+            const slug =
+              productData.slug?.trim() ||
+              slugify(productData.name) ||
+              `product-${product.id.slice(-8)}`;
+            await tx.productChannel.create({
+              data: {
+                productId: product.id,
+                channelId,
+                slug,
+                price: productData.basePrice,
+                isPublished: true,
+              },
+            });
+          }
+        }
+
         return product;
       }),
     );
@@ -153,6 +291,10 @@ export class ProductsService {
         images: { orderBy: { sortOrder: 'asc' } },
         inventory: true,
         channels: { include: { channel: true } },
+        variants: {
+          where: { deletedAt: null },
+          orderBy: { sortOrder: 'asc' },
+        },
       },
     });
     if (!product) {
@@ -177,8 +319,28 @@ export class ProductsService {
   async update(id: string, dto: UpdateProductDto, user: JwtPayload) {
     await this.requireActiveProduct(id);
     await this.assertVisibleById(user, id);
+    // variants/channelIds/categoryIds/initialStock are create-only (not
+    // Product scalar columns) — editing variants happens through the
+    // dedicated variant endpoints below instead, so they're dropped here
+    // rather than passed through to Prisma.
+    /* eslint-disable @typescript-eslint/no-unused-vars */
+    const {
+      variants,
+      channelIds,
+      categoryIds,
+      initialStock,
+      specifications,
+      ...productData
+    } = dto;
+    /* eslint-enable @typescript-eslint/no-unused-vars */
+    const updateData: Prisma.ProductUncheckedUpdateInput = {
+      ...productData,
+      ...(specifications !== undefined
+        ? { specifications: specifications as unknown as Prisma.InputJsonValue }
+        : {}),
+    };
     return this.handleUniqueConstraints(() =>
-      this.prisma.product.update({ where: { id }, data: dto }),
+      this.prisma.product.update({ where: { id }, data: updateData }),
     );
   }
 
@@ -215,6 +377,191 @@ export class ProductsService {
     }
     await this.prisma.productImage.delete({ where: { id: imageId } });
     return { success: true };
+  }
+
+  // Applies a stock delta from a variant add/edit/remove to the product's
+  // own master Inventory row — see the ProductVariant schema comment for
+  // why that row is kept as the sum of all variant stocks. Same
+  // check-and-update shape as InventoryService.adjust(): a conditional
+  // UPDATE that refuses to take currentStock below zero, paired with a
+  // StockMovement row in the same transaction (the ledger invariant every
+  // other stock change in this codebase follows).
+  private async applyVariantStockDelta(
+    tx: Prisma.TransactionClient,
+    productId: string,
+    delta: number,
+    note: string,
+  ) {
+    if (delta === 0) return;
+    const rows = await tx.$queryRaw<{ currentStock: number }[]>`
+      UPDATE inventory
+      SET "currentStock" = "currentStock" + ${delta}, "updatedAt" = now()
+      WHERE "productId" = ${productId} AND ("currentStock" + ${delta}) >= 0
+      RETURNING "currentStock"
+    `;
+    if (rows.length === 0) {
+      throw new ConflictException(
+        'This change would take stock below zero for this product',
+      );
+    }
+    await tx.stockMovement.create({
+      data: {
+        productId,
+        type: 'ADJUSTMENT',
+        quantity: delta,
+        balanceAfter: rows[0].currentStock,
+        referenceType: 'MANUAL_ADJUSTMENT',
+        note,
+      },
+    });
+  }
+
+  // Keeps Product.basePrice — the fallback price shown wherever nothing
+  // more specific overrides it — as the cheapest active variant, same rule
+  // create() uses when a variant product is first made.
+  private async recomputeBasePriceFromVariants(
+    tx: Prisma.TransactionClient,
+    productId: string,
+  ) {
+    const variants = await tx.productVariant.findMany({
+      where: { productId, deletedAt: null, isActive: true },
+      select: { basePrice: true },
+    });
+    if (variants.length === 0) return;
+    const min = variants.reduce(
+      (m, v) => (Number(v.basePrice) < m ? Number(v.basePrice) : m),
+      Number(variants[0].basePrice),
+    );
+    await tx.product.update({
+      where: { id: productId },
+      data: { basePrice: min },
+    });
+  }
+
+  // Keeps "at most one default variant" true at the data layer — the admin
+  // UI's radio button already enforces single-select, but a variant added
+  // or edited with isDefault: true here always wins over whichever one
+  // held it before.
+  private async clearOtherDefaults(
+    tx: Prisma.TransactionClient,
+    productId: string,
+    exceptVariantId?: string,
+  ) {
+    await tx.productVariant.updateMany({
+      where: {
+        productId,
+        deletedAt: null,
+        isDefault: true,
+        ...(exceptVariantId ? { id: { not: exceptVariantId } } : {}),
+      },
+      data: { isDefault: false },
+    });
+  }
+
+  async addVariant(
+    productId: string,
+    dto: CreateProductVariantDto,
+    user: JwtPayload,
+  ) {
+    await this.requireActiveProduct(productId);
+    await this.assertVisibleById(user, productId);
+    return this.handleUniqueConstraints(() =>
+      runTransaction(this.prisma, async (tx) => {
+        const maxSort = await tx.productVariant.aggregate({
+          where: { productId, deletedAt: null },
+          _max: { sortOrder: true },
+        });
+        if (dto.isDefault) {
+          await this.clearOtherDefaults(tx, productId);
+        }
+        const variant = await tx.productVariant.create({
+          data: {
+            productId,
+            sku: dto.sku,
+            unitLabel: dto.unitLabel,
+            basePrice: dto.basePrice,
+            compareAtPrice: dto.compareAtPrice,
+            stock: dto.stock ?? 0,
+            imageUrl: dto.imageUrl,
+            isDefault: !!dto.isDefault,
+            isActive: dto.isActive ?? true,
+            sortOrder: (maxSort._max.sortOrder ?? -1) + 1,
+          },
+        });
+        await this.applyVariantStockDelta(
+          tx,
+          productId,
+          dto.stock ?? 0,
+          `Variant added: ${dto.sku}`,
+        );
+        await this.recomputeBasePriceFromVariants(tx, productId);
+        return variant;
+      }),
+    );
+  }
+
+  async updateVariant(
+    productId: string,
+    variantId: string,
+    dto: UpdateProductVariantDto,
+    user: JwtPayload,
+  ) {
+    await this.requireActiveProduct(productId);
+    await this.assertVisibleById(user, productId);
+    const existing = await this.prisma.productVariant.findFirst({
+      where: { id: variantId, productId, deletedAt: null },
+    });
+    if (!existing) {
+      throw new NotFoundException(`Variant ${variantId} not found`);
+    }
+    return this.handleUniqueConstraints(() =>
+      runTransaction(this.prisma, async (tx) => {
+        if (dto.isDefault) {
+          await this.clearOtherDefaults(tx, productId, variantId);
+        }
+        const updated = await tx.productVariant.update({
+          where: { id: variantId },
+          data: dto,
+        });
+        if (dto.stock !== undefined && dto.stock !== existing.stock) {
+          await this.applyVariantStockDelta(
+            tx,
+            productId,
+            dto.stock - existing.stock,
+            `Variant stock adjusted: ${updated.sku}`,
+          );
+        }
+        if (dto.basePrice !== undefined) {
+          await this.recomputeBasePriceFromVariants(tx, productId);
+        }
+        return updated;
+      }),
+    );
+  }
+
+  async removeVariant(productId: string, variantId: string, user: JwtPayload) {
+    await this.requireActiveProduct(productId);
+    await this.assertVisibleById(user, productId);
+    const existing = await this.prisma.productVariant.findFirst({
+      where: { id: variantId, productId, deletedAt: null },
+    });
+    if (!existing) {
+      throw new NotFoundException(`Variant ${variantId} not found`);
+    }
+    return runTransaction(this.prisma, async (tx) => {
+      const updated = await tx.productVariant.update({
+        where: { id: variantId },
+        data: { deletedAt: new Date() },
+      });
+      await this.applyVariantStockDelta(
+        tx,
+        productId,
+        -existing.stock,
+        `Variant removed: ${existing.sku}`,
+      );
+      await this.recomputeBasePriceFromVariants(tx, productId);
+      return updated;
+    });
   }
 
   // One row per active channel, merged with this product's ProductChannel

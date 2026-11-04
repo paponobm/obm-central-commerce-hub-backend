@@ -6,6 +6,7 @@ import {
   Param,
   Patch,
   Post,
+  Put,
   UseGuards,
 } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -14,6 +15,7 @@ import { RequirePermissions } from '../auth/decorators/require-permissions.decor
 import { CategoriesService } from './categories.service';
 import { CreateCategoryDto } from './dto/create-category.dto';
 import { UpdateCategoryDto } from './dto/update-category.dto';
+import { SetCategoryChannelsDto } from './dto/set-category-channels.dto';
 
 @Controller('admin/categories')
 @UseGuards(JwtAuthGuard, PermissionsGuard)
@@ -48,5 +50,13 @@ export class CategoriesController {
   @RequirePermissions('products.manage')
   remove(@Param('id') id: string) {
     return this.categoriesService.remove(id);
+  }
+
+  // Which active storefronts this category is published to — exhaustive
+  // per call, not additive (see CategoriesService.setCategoryChannels).
+  @Put(':id/channels')
+  @RequirePermissions('products.manage')
+  setChannels(@Param('id') id: string, @Body() dto: SetCategoryChannelsDto) {
+    return this.categoriesService.setCategoryChannels(id, dto);
   }
 }
