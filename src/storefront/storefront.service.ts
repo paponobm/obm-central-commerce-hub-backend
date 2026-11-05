@@ -481,4 +481,68 @@ export class StorefrontService {
       items,
     };
   }
+
+  // "কাস্টমারদের অভিজ্ঞতা" — admin-entered testimonials (Settings → Review).
+  // Each review's linked product, if any, is resolved against this
+  // channel's live, published products at read time — same reasoning as
+  // getFlashSale: a product that's since been unpublished/deleted just
+  // drops the link instead of showing a dead one.
+  async getReviews(channel: Channel) {
+    type RawReview = {
+      customerName?: string;
+      location?: string | null;
+      rating?: number;
+      text?: string;
+      productId?: string;
+      enabled?: boolean;
+    };
+    const theme = channel.themeConfig as { reviews?: RawReview[] } | null;
+    const reviews = (theme?.reviews ?? []).filter(
+      (r) =>
+        (r.enabled ?? true) &&
+        r.customerName?.trim() &&
+        r.text?.trim() &&
+        r.rating,
+    );
+    if (reviews.length === 0) return [];
+
+    const productIds = [
+      ...new Set(
+        reviews.map((r) => r.productId).filter((id): id is string => !!id),
+      ),
+    ];
+    const productRows = productIds.length
+      ? await this.prisma.productChannel.findMany({
+          where: {
+            channelId: channel.id,
+            isPublished: true,
+            productId: { in: productIds },
+            product: { isActive: true, deletedAt: null },
+          },
+          select: {
+            productId: true,
+            slug: true,
+            name: true,
+            product: { select: { name: true } },
+          },
+        })
+      : [];
+    const productById = new Map(
+      productRows.map((p) => [
+        p.productId,
+        { slug: p.slug, name: p.name ?? p.product.name },
+      ]),
+    );
+
+    return reviews.map((r) => {
+      const product = r.productId ? productById.get(r.productId) : undefined;
+      return {
+        customerName: r.customerName!.trim(),
+        location: r.location?.trim() || null,
+        rating: Math.min(5, Math.max(1, Math.round(r.rating!))),
+        text: r.text!.trim(),
+        product: product ? { name: product.name, slug: product.slug } : null,
+      };
+    });
+  }
 }
