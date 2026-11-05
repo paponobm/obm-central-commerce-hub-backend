@@ -20,6 +20,9 @@ const productChannelWithProduct =
           // Extra categories (on top of the single `category` above) — lets
           // a product show up under more than one storefront category page.
           categories: { include: { category: true } },
+          // Only for the Flash Deal card's "৳min–৳max" range on variant
+          // products — negligible extra cost on a single-product join.
+          variants: { where: { deletedAt: null, isActive: true } },
         },
       },
     },
@@ -48,10 +51,13 @@ export class StorefrontService {
     // until it's saved again. Missing `enabled` defaults to on, matching
     // pre-toggle behavior.
     type RawTrustBadge =
-      | string
-      | { text?: string; icon?: string; enabled?: boolean };
+      string | { text?: string; icon?: string; enabled?: boolean };
     const DEFAULT_ICONS = ['shield', 'cash', 'truck', 'clock'];
-    type RawComboTier = { title?: string; description?: string; enabled?: boolean };
+    type RawComboTier = {
+      title?: string;
+      description?: string;
+      enabled?: boolean;
+    };
     type RawComboBanner = {
       newBadge?: boolean;
       title?: string;
@@ -77,7 +83,11 @@ export class StorefrontService {
     const trustBadges = (theme?.trustBadges ?? [])
       .map((b, i) =>
         typeof b === 'string'
-          ? { text: b, icon: DEFAULT_ICONS[i % DEFAULT_ICONS.length], enabled: true }
+          ? {
+              text: b,
+              icon: DEFAULT_ICONS[i % DEFAULT_ICONS.length],
+              enabled: true,
+            }
           : {
               text: b.text ?? '',
               icon: b.icon ?? DEFAULT_ICONS[i % DEFAULT_ICONS.length],
@@ -102,7 +112,10 @@ export class StorefrontService {
         description: c.description ?? '',
         tiers: (c.tiers ?? [])
           .filter((t) => t.enabled && t.title?.trim())
-          .map((t) => ({ title: t.title ?? '', description: t.description ?? '' })),
+          .map((t) => ({
+            title: t.title ?? '',
+            description: t.description ?? '',
+          })),
       }));
 
     return {
@@ -136,7 +149,13 @@ export class StorefrontService {
         isPublished: true,
         ...(slugs && slugs.length > 0 ? { slug: { in: slugs } } : {}),
       },
-      select: { id: true, name: true, slug: true, parentId: true, imageUrl: true },
+      select: {
+        id: true,
+        name: true,
+        slug: true,
+        parentId: true,
+        imageUrl: true,
+      },
       orderBy: { name: 'asc' },
     });
     if (slugs && slugs.length > 0) {
@@ -397,6 +416,69 @@ export class StorefrontService {
         ? { id: pc.product.brand.id, name: pc.product.brand.name }
         : null,
       inStock: available > 0,
+      slogan: pc.product.slogan,
+      specifications:
+        (pc.product.specifications as
+          { key: string; value: string }[] | null) ?? null,
+      hasVariants: pc.product.hasVariants,
+      // Flash Deal's "৳min–৳max" range and "২টি সাইজ"-style button label —
+      // only meaningful (and only sent) for a variant product; a simple
+      // product always just uses `price` and a plain add-to-cart button.
+      ...(pc.product.hasVariants && pc.product.variants.length > 0
+        ? {
+            minPrice: Math.min(
+              ...pc.product.variants.map((v) => toNumber(v.basePrice)),
+            ),
+            maxPrice: Math.max(
+              ...pc.product.variants.map((v) => toNumber(v.basePrice)),
+            ),
+            variantCount: pc.product.variants.length,
+            variantOptionLabel: pc.product.variantOptionLabel,
+          }
+        : {}),
+    };
+  }
+
+  // The homepage Flash Deal section: admin-curated product ids + order,
+  // resolved against this channel's live, published products at read
+  // time — a product that's since been unpublished, deactivated, or
+  // deleted just silently drops out rather than showing a dead card.
+  async getFlashSale(channel: Channel) {
+    type RawFlashSale = {
+      enabled?: boolean;
+      endsAt?: string | null;
+      productIds?: string[];
+    };
+    const theme = channel.themeConfig as { flashSale?: RawFlashSale } | null;
+    const flashSale = theme?.flashSale;
+    const productIds = flashSale?.productIds ?? [];
+    if (!flashSale?.enabled || productIds.length === 0) {
+      return { enabled: false, endsAt: null, items: [] };
+    }
+
+    const rows = await this.prisma.productChannel.findMany({
+      where: {
+        channelId: channel.id,
+        isPublished: true,
+        productId: { in: productIds },
+        product: { isActive: true, deletedAt: null },
+      },
+      ...productChannelWithProduct,
+      relationLoadStrategy: 'join',
+    });
+
+    // The query above doesn't preserve `productIds`' order, so re-sort to
+    // match the admin's numbered list — that order IS the display order.
+    const byId = new Map(rows.map((r) => [r.productId, r]));
+    const items = productIds
+      .map((id) => byId.get(id))
+      .filter((r): r is ProductChannelWithProduct => !!r)
+      .map((pc) => this.toPublicProduct(pc));
+
+    return {
+      enabled: true,
+      endsAt: flashSale.endsAt ?? null,
+      items,
     };
   }
 }

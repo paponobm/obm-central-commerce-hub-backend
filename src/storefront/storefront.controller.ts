@@ -33,6 +33,11 @@ export class StorefrontController {
     return this.storefrontService.getCategories(channel);
   }
 
+  @Get('flash-sale')
+  getFlashSale(@CurrentChannel() channel: Channel) {
+    return this.storefrontService.getFlashSale(channel);
+  }
+
   @Get('products')
   getProducts(
     @CurrentChannel() channel: Channel,

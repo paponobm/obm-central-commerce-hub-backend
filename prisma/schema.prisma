@@ -381,6 +381,14 @@ model Product {
   // basePrice, compareAtPrice, the Inventory row) IS the one sellable unit.
   // Existing products are unaffected — they're all `false`.
   hasVariants  Boolean   @default(false)
+  // The attribute name behind this product's variants (e.g. "সাইজ",
+  // "ফ্লেভার") — set from the New/Edit Product page's "Step 1 — Options"
+  // generator when exactly one attribute was used to build them. Null
+  // means either no variants, variants added without that generator, or
+  // more than one attribute combined (e.g. Size + Flavor together) — the
+  // storefront falls back to a generic "ভ্যারিয়েন্ট" label in that case,
+  // since naming a single attribute wouldn't be accurate.
+  variantOptionLabel String?
   // The single image shown anywhere a product needs a small icon (order
   // lines, inventory, product lists) — distinct from `images` below, which
   // is the storefront's full photo gallery. Falls back to the gallery's

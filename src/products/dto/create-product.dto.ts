@@ -89,6 +89,14 @@ export class CreateProductDto {
   @IsBoolean()
   hasVariants?: boolean;
 
+  // The attribute name behind this product's variants (e.g. "সাইজ",
+  // "ফ্লেভার") — set from the Pricing & Variants "Step 1 — Options"
+  // generator when exactly one attribute was used. Omitted/null means the
+  // storefront shows a generic "ভ্যারিয়েন্ট" label instead.
+  @IsOptional()
+  @IsString()
+  variantOptionLabel?: string;
+
   // Only meaningful when hasVariants is false — the master Inventory row's
   // starting currentStock. Ignored (variant stocks are summed instead) when
   // variants are present.

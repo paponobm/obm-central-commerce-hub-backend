@@ -340,7 +340,31 @@ export class ProductsService {
         : {}),
     };
     return this.handleUniqueConstraints(() =>
-      this.prisma.product.update({ where: { id }, data: updateData }),
+      runTransaction(this.prisma, async (tx) => {
+        const updated = await tx.product.update({
+          where: { id },
+          data: updateData,
+        });
+        // No UI sets a channel's own price separately from the product's
+        // anymore (Publish is just a checkbox + category now) — so every
+        // channel this product is on just tracks basePrice/compareAtPrice
+        // here, instead of freezing at whatever price it had when first
+        // published.
+        if (dto.basePrice !== undefined || dto.compareAtPrice !== undefined) {
+          await tx.productChannel.updateMany({
+            where: { productId: id },
+            data: {
+              ...(dto.basePrice !== undefined
+                ? { price: updated.basePrice }
+                : {}),
+              ...(dto.compareAtPrice !== undefined
+                ? { compareAtPrice: updated.compareAtPrice }
+                : {}),
+            },
+          });
+        }
+        return updated;
+      }),
     );
   }
 
@@ -635,6 +659,8 @@ export class ProductsService {
       slugify(dto.name ?? product.name) ||
       `product-${productId.slice(-8)}`;
     const price = dto.price ?? existing?.price ?? product.basePrice;
+    const compareAtPrice =
+      dto.compareAtPrice ?? existing?.compareAtPrice ?? product.compareAtPrice;
 
     return this.handleUniqueConstraints(() =>
       this.prisma.productChannel.upsert({
@@ -646,7 +672,7 @@ export class ProductsService {
           slug,
           description: dto.description,
           price,
-          compareAtPrice: dto.compareAtPrice,
+          compareAtPrice,
           isPublished: dto.isPublished ?? false,
           isFeatured: dto.isFeatured ?? false,
           sortOrder: dto.sortOrder ?? 0,
@@ -660,9 +686,7 @@ export class ProductsService {
             ? { description: dto.description }
             : {}),
           price,
-          ...(dto.compareAtPrice !== undefined
-            ? { compareAtPrice: dto.compareAtPrice }
-            : {}),
+          compareAtPrice,
           ...(dto.isPublished !== undefined
             ? { isPublished: dto.isPublished }
             : {}),

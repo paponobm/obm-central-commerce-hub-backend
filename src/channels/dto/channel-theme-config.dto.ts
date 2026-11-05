@@ -10,6 +10,7 @@ import { HeroCouponDto } from './hero-coupon.dto';
 import { HeroSlideDto } from './hero-slide.dto';
 import { TrustBadgeDto } from './trust-badge.dto';
 import { ComboBannerDto } from './combo-banner.dto';
+import { FlashSaleDto } from './flash-sale.dto';
 
 // Grows as more per-storefront cosmetic config lands (WhatsApp number,
 // etc.) — each a validated optional sub-object here, merged (not replaced)
@@ -64,4 +65,11 @@ export class ChannelThemeConfigDto {
   @ValidateNested({ each: true })
   @Type(() => ComboBannerDto)
   comboBanners?: ComboBannerDto[];
+
+  // The homepage "Flash Deal" section — which products, in what order, and
+  // the countdown deadline. Omitted means the section doesn't render.
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => FlashSaleDto)
+  flashSale?: FlashSaleDto;
 }
