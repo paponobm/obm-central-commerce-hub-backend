@@ -43,6 +43,11 @@ export class StorefrontController {
     return this.storefrontService.getReviews(channel);
   }
 
+  @Get('health-tips')
+  getHealthTips(@CurrentChannel() channel: Channel) {
+    return this.storefrontService.getHealthTips(channel);
+  }
+
   @Get('products')
   getProducts(
     @CurrentChannel() channel: Channel,

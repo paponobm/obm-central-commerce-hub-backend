@@ -545,4 +545,46 @@ export class StorefrontService {
       };
     });
   }
+
+  // "স্বাস্থ্য টিপস" — admin-entered article teasers (Settings → Health
+  // Tips). Each tip's category, if any, is resolved against the shared,
+  // global Category table at read time — same reasoning as getReviews: a
+  // category that's since been unpublished/deleted just drops the label
+  // instead of showing a stale one.
+  async getHealthTips(channel: Channel) {
+    type RawTip = {
+      title?: string;
+      categoryId?: string;
+      readMinutes?: number;
+      enabled?: boolean;
+    };
+    const theme = channel.themeConfig as { healthTips?: RawTip[] } | null;
+    const tips = (theme?.healthTips ?? []).filter(
+      (t) => (t.enabled ?? true) && t.title?.trim(),
+    );
+    if (tips.length === 0) return [];
+
+    const categoryIds = [
+      ...new Set(
+        tips.map((t) => t.categoryId).filter((id): id is string => !!id),
+      ),
+    ];
+    const categories = categoryIds.length
+      ? await this.prisma.category.findMany({
+          where: {
+            id: { in: categoryIds },
+            deletedAt: null,
+            isPublished: true,
+          },
+          select: { id: true, name: true },
+        })
+      : [];
+    const categoryById = new Map(categories.map((c) => [c.id, c.name]));
+
+    return tips.map((t) => ({
+      title: t.title!.trim(),
+      category: t.categoryId ? (categoryById.get(t.categoryId) ?? null) : null,
+      readMinutes: t.readMinutes ?? null,
+    }));
+  }
 }
