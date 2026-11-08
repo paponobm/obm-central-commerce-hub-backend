@@ -3,6 +3,7 @@ import {
   IsArray,
   IsOptional,
   IsString,
+  MaxLength,
   ValidateNested,
 } from 'class-validator';
 import { Type } from 'class-transformer';
@@ -13,6 +14,7 @@ import { ComboBannerDto } from './combo-banner.dto';
 import { FlashSaleDto } from './flash-sale.dto';
 import { ReviewDto } from './review.dto';
 import { HealthTipDto } from './health-tip.dto';
+import { SocialLinkDto } from './social-link.dto';
 
 // Grows as more per-storefront cosmetic config lands (WhatsApp number,
 // etc.) — each a validated optional sub-object here, merged (not replaced)
@@ -93,4 +95,22 @@ export class ChannelThemeConfigDto {
   @ValidateNested({ each: true })
   @Type(() => HealthTipDto)
   healthTips?: HealthTipDto[];
+
+  // The side menu's "কাস্টমার কেয়ার" box — a single phone number shown
+  // (and WhatsApp-linked/copyable) on the storefront. Omitted/blank hides
+  // that box entirely.
+  @IsOptional()
+  @IsString()
+  @MaxLength(30)
+  customerCarePhone?: string;
+
+  // The side menu's "আমাদের ফলো করুন" row — admin-picked platform (fixed
+  // palette, see SocialLinkDto) + its URL. Omitted/empty means no row
+  // renders.
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(8)
+  @ValidateNested({ each: true })
+  @Type(() => SocialLinkDto)
+  socialLinks?: SocialLinkDto[];
 }

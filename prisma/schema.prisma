@@ -310,6 +310,9 @@ model Category {
   name        String
   slug        String    @unique
   imageUrl    String?
+  // Short storefront subtitle shown under the category name (e.g. in a
+  // side-menu category list) — purely descriptive, no effect on catalog logic.
+  slogan      String?
   parentId    String?
   isPublished Boolean   @default(true)
   deletedAt   DateTime?

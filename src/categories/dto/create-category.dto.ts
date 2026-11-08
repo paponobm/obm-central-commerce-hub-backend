@@ -28,6 +28,11 @@ export class CreateCategoryDto {
   imageUrl?: string;
 
   @IsOptional()
+  @IsString()
+  @MaxLength(160)
+  slogan?: string;
+
+  @IsOptional()
   @IsBoolean()
   isPublished?: boolean;
 }

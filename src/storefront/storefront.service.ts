@@ -65,6 +65,7 @@ export class StorefrontService {
       tiers?: RawComboTier[];
       enabled?: boolean;
     };
+    type RawSocialLink = { platform?: string; url?: string };
     const theme = channel.themeConfig as {
       heroCoupon?: RawCoupon;
       heroSlides?: {
@@ -75,6 +76,8 @@ export class StorefrontService {
       }[];
       trustBadges?: RawTrustBadge[];
       comboBanners?: RawComboBanner[];
+      customerCarePhone?: string;
+      socialLinks?: RawSocialLink[];
     } | null;
 
     const toPublicCoupon = (c?: RawCoupon) =>
@@ -118,6 +121,10 @@ export class StorefrontService {
           })),
       }));
 
+    const socialLinks = (theme?.socialLinks ?? [])
+      .filter((s) => s.platform?.trim() && s.url?.trim())
+      .map((s) => ({ platform: s.platform as string, url: s.url as string }));
+
     return {
       name: channel.name,
       logoUrl: channel.logoUrl,
@@ -130,6 +137,8 @@ export class StorefrontService {
       })),
       trustBadges,
       comboBanners,
+      customerCarePhone: theme?.customerCarePhone?.trim() || null,
+      socialLinks,
     };
   }
 
@@ -155,6 +164,7 @@ export class StorefrontService {
         slug: true,
         parentId: true,
         imageUrl: true,
+        slogan: true,
       },
       orderBy: { name: 'asc' },
     });
@@ -167,7 +177,28 @@ export class StorefrontService {
         (a, b) => (order.get(a.slug) ?? 0) - (order.get(b.slug) ?? 0),
       );
     }
-    return categories;
+    // Same primary-category-or-tagged-category match as getProducts()'s own
+    // categoryId filter, scoped to this channel's published listings — so
+    // the count shown next to a category always matches what browsing into
+    // it would actually return.
+    const counts = await Promise.all(
+      categories.map((c) =>
+        this.prisma.productChannel.count({
+          where: {
+            channelId: channel.id,
+            isPublished: true,
+            product: {
+              deletedAt: null,
+              OR: [
+                { categoryId: c.id },
+                { categories: { some: { categoryId: c.id } } },
+              ],
+            },
+          },
+        }),
+      ),
+    );
+    return categories.map((c, i) => ({ ...c, productCount: counts[i] }));
   }
 
   async getProducts(
