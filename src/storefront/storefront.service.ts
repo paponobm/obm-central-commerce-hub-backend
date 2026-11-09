@@ -22,7 +22,10 @@ const productChannelWithProduct =
           categories: { include: { category: true } },
           // Only for the Flash Deal card's "৳min–৳max" range on variant
           // products — negligible extra cost on a single-product join.
-          variants: { where: { deletedAt: null, isActive: true } },
+          variants: {
+            where: { deletedAt: null, isActive: true },
+            orderBy: { sortOrder: 'asc' },
+          },
         },
       },
     },
@@ -338,6 +341,7 @@ export class StorefrontService {
         shippingAddress: dto.shippingAddress,
         items: dto.items.map((i) => ({
           productId: i.productId,
+          variantId: i.variantId,
           quantity: i.quantity,
         })),
         paymentMethod: dto.paymentMethod,
@@ -465,6 +469,21 @@ export class StorefrontService {
             ),
             variantCount: pc.product.variants.length,
             variantOptionLabel: pc.product.variantOptionLabel,
+            // The actual pickable list — a real variant picker (product
+            // page, combo builder) needs each one's own id/label/price, not
+            // just the summary range above. Stock is surfaced as a boolean
+            // only, same privacy rule as the product-level `inStock`.
+            variants: pc.product.variants.map((v) => ({
+              id: v.id,
+              label: v.unitLabel,
+              price: toNumber(v.basePrice),
+              compareAtPrice: v.compareAtPrice
+                ? toNumber(v.compareAtPrice)
+                : null,
+              imageUrl: v.imageUrl,
+              inStock: v.stock > 0,
+              isDefault: v.isDefault,
+            })),
           }
         : {}),
     };

@@ -17,7 +17,10 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { runTransaction } from '../common/prisma-transaction.util';
 import { toNumber } from '../common/decimal.util';
-import { businessDateStr, resolveDateRange } from '../common/business-date.util';
+import {
+  businessDateStr,
+  resolveDateRange,
+} from '../common/business-date.util';
 import {
   ALL_ACCESS_PERMISSION,
   ChannelScopeService,
@@ -335,10 +338,10 @@ export class OrdersService {
     }
     const [stats, flags, adminNotes, lastActivity] = await Promise.all([
       this.getCustomerStats([order.customerId]),
-      this.getAuditFlags([order.id], [
-        'order.invoice_printed',
-        'order.web_approved',
-      ]),
+      this.getAuditFlags(
+        [order.id],
+        ['order.invoice_printed', 'order.web_approved'],
+      ),
       this.getAdminNotes([order.id]),
       this.getLastOrderActivity([order.id]),
     ]);
@@ -348,7 +351,10 @@ export class OrdersService {
       invoicePrinted: orderFlags?.has('order.invoice_printed') ?? false,
       webApproved: orderFlags?.has('order.web_approved') ?? false,
       adminNotes: adminNotes.get(order.id) ?? [],
-      lastUpdate: lastActivity.get(order.id) ?? { at: order.updatedAt, by: null },
+      lastUpdate: lastActivity.get(order.id) ?? {
+        at: order.updatedAt,
+        by: null,
+      },
       customer: {
         ...order.customer,
         successRate: stats.get(order.customerId)?.successRate ?? null,
@@ -1380,23 +1386,54 @@ export class OrdersService {
       }
     }
 
+    // Variants have no channel-specific price override (no such model
+    // exists) — a variant line always prices off its own basePrice,
+    // skipping the channel-price lookup entirely.
+    const variantIds = [
+      ...new Set(
+        dto.items.map((i) => i.variantId).filter((id): id is string => !!id),
+      ),
+    ];
+    const variants = variantIds.length
+      ? await this.prisma.productVariant.findMany({
+          where: { id: { in: variantIds }, deletedAt: null, isActive: true },
+        })
+      : [];
+    const variantMap = new Map(variants.map((v) => [v.id, v]));
+    for (const item of dto.items) {
+      if (!item.variantId) continue;
+      const variant = variantMap.get(item.variantId);
+      if (!variant) {
+        throw new NotFoundException(`Variant ${item.variantId} not found`);
+      }
+      if (variant.productId !== item.productId) {
+        throw new BadRequestException(
+          `Variant ${item.variantId} does not belong to product ${item.productId}`,
+        );
+      }
+    }
+
     const lineItems = dto.items.map((item) => {
       const product = productMap.get(item.productId)!;
+      const variant = item.variantId ? variantMap.get(item.variantId) : null;
       const unitPrice =
         item.unitPrice ??
-        channelPrices.get(item.productId) ??
-        toNumber(product.basePrice);
+        (variant
+          ? toNumber(variant.basePrice)
+          : (channelPrices.get(item.productId) ?? toNumber(product.basePrice)));
       const discount = item.discount ?? 0;
       const total = item.quantity * unitPrice - discount;
       if (total < 0) {
         throw new BadRequestException(
-          `Discount exceeds line total for ${product.sku}`,
+          `Discount exceeds line total for ${variant?.sku ?? product.sku}`,
         );
       }
       return {
         productId: product.id,
         productName: product.name,
-        sku: product.sku,
+        sku: variant?.sku ?? product.sku,
+        variantId: variant?.id ?? null,
+        variantLabel: variant?.unitLabel ?? null,
         quantity: item.quantity,
         unitPrice,
         discount,
@@ -1470,7 +1507,9 @@ export class OrdersService {
             shippingAddress,
             notes: dto.notes,
             deliveryMethod: dto.deliveryMethod,
-            preorderReason: dto.isPreorder ? (dto.preorderReason ?? null) : null,
+            preorderReason: dto.isPreorder
+              ? (dto.preorderReason ?? null)
+              : null,
             preorderNotifyAt:
               dto.isPreorder && dto.preorderNotifyAt
                 ? new Date(dto.preorderNotifyAt)
@@ -1481,6 +1520,8 @@ export class OrdersService {
                 productId: li.productId,
                 productName: li.productName,
                 sku: li.sku,
+                variantId: li.variantId,
+                variantLabel: li.variantLabel,
                 quantity: li.quantity,
                 unitPrice: li.unitPrice,
                 discount: li.discount,
@@ -1614,23 +1655,51 @@ export class OrdersService {
       }
     }
 
+    const variantIds = [
+      ...new Set(
+        dto.items.map((i) => i.variantId).filter((id): id is string => !!id),
+      ),
+    ];
+    const variants = variantIds.length
+      ? await this.prisma.productVariant.findMany({
+          where: { id: { in: variantIds }, deletedAt: null, isActive: true },
+        })
+      : [];
+    const variantMap = new Map(variants.map((v) => [v.id, v]));
+    for (const item of dto.items) {
+      if (!item.variantId) continue;
+      const variant = variantMap.get(item.variantId);
+      if (!variant) {
+        throw new NotFoundException(`Variant ${item.variantId} not found`);
+      }
+      if (variant.productId !== item.productId) {
+        throw new BadRequestException(
+          `Variant ${item.variantId} does not belong to product ${item.productId}`,
+        );
+      }
+    }
+
     const lineItems = dto.items.map((item) => {
       const product = productMap.get(item.productId)!;
+      const variant = item.variantId ? variantMap.get(item.variantId) : null;
       const unitPrice =
         item.unitPrice ??
-        channelPrices.get(item.productId) ??
-        toNumber(product.basePrice);
+        (variant
+          ? toNumber(variant.basePrice)
+          : (channelPrices.get(item.productId) ?? toNumber(product.basePrice)));
       const discount = item.discount ?? 0;
       const total = item.quantity * unitPrice - discount;
       if (total < 0) {
         throw new BadRequestException(
-          `Discount exceeds line total for ${product.sku}`,
+          `Discount exceeds line total for ${variant?.sku ?? product.sku}`,
         );
       }
       return {
         productId: product.id,
         productName: product.name,
-        sku: product.sku,
+        sku: variant?.sku ?? product.sku,
+        variantId: variant?.id ?? null,
+        variantLabel: variant?.unitLabel ?? null,
         quantity: item.quantity,
         unitPrice,
         discount,
@@ -1682,6 +1751,8 @@ export class OrdersService {
             productId: li.productId,
             productName: li.productName,
             sku: li.sku,
+            variantId: li.variantId,
+            variantLabel: li.variantLabel,
             quantity: li.quantity,
             unitPrice: li.unitPrice,
             discount: li.discount,
@@ -1886,8 +1957,17 @@ export class OrdersService {
         // same as a post-shipment RETURNED does once it's gone further.
         if (dto.status === 'READY_TO_SHIP') {
           await this.deductOnShip(tx, order, actorUserId);
-        } else if (order.status === 'READY_TO_SHIP' && dto.status !== 'SHIPPED') {
-          await this.restockOnReturn(tx, order, 'restock', actorUserId, 'rts_reversal');
+        } else if (
+          order.status === 'READY_TO_SHIP' &&
+          dto.status !== 'SHIPPED'
+        ) {
+          await this.restockOnReturn(
+            tx,
+            order,
+            'restock',
+            actorUserId,
+            'rts_reversal',
+          );
         } else if (dto.status === 'RETURNED') {
           await this.restockOnReturn(
             tx,
@@ -2106,6 +2186,7 @@ export class OrdersService {
       orderNumber: string;
       items: {
         productId: string;
+        variantId: string | null;
         quantity: number;
         sku: string;
         productName: string;
@@ -2115,8 +2196,30 @@ export class OrdersService {
   ) {
     // Fires once an order reaches READY_TO_SHIP — only has to check against
     // and deduct from currentStock itself (no reservedStock bookkeeping).
+    // A variant line deducts from that ProductVariant's own `stock` column
+    // instead of the product-level `inventory` row — the two are separate,
+    // unreconciled numbers in this schema (Inventory has no per-variant
+    // breakdown), so a variant sale was never going to move the product's
+    // aggregate currentStock correctly anyway. No StockMovement is logged
+    // for variant lines: that ledger's `balanceAfter` is an Inventory
+    // snapshot, and Inventory isn't what changed here.
     const movements: Prisma.StockMovementCreateManyInput[] = [];
     for (const item of order.items) {
+      if (item.variantId) {
+        const rows = await tx.$queryRaw<{ stock: number }[]>`
+          UPDATE product_variants
+          SET "stock" = "stock" - ${item.quantity}, "updatedAt" = now()
+          WHERE "id" = ${item.variantId}
+            AND "stock" >= ${item.quantity}
+          RETURNING "stock"
+        `;
+        if (rows.length === 0) {
+          throw new ConflictException(
+            `Cannot mark Ready to Ship — insufficient stock for ${item.sku} (${item.productName})`,
+          );
+        }
+        continue;
+      }
       const rows = await tx.$queryRaw<StockRow[]>`
         UPDATE inventory
         SET "currentStock" = "currentStock" - ${item.quantity}, "updatedAt" = now()
@@ -2148,7 +2251,11 @@ export class OrdersService {
     order: {
       id: string;
       orderNumber: string;
-      items: { productId: string; quantity: number }[];
+      items: {
+        productId: string;
+        variantId: string | null;
+        quantity: number;
+      }[];
     },
     action: 'restock' | 'write_off',
     actorUserId?: string,
@@ -2166,6 +2273,14 @@ export class OrdersService {
 
     const movements: Prisma.StockMovementCreateManyInput[] = [];
     for (const item of order.items) {
+      if (item.variantId) {
+        await tx.$executeRaw`
+          UPDATE product_variants
+          SET "stock" = "stock" + ${item.quantity}, "updatedAt" = now()
+          WHERE "id" = ${item.variantId}
+        `;
+        continue;
+      }
       const rows = await tx.$queryRaw<StockRow[]>`
         UPDATE inventory
         SET "currentStock" = "currentStock" + ${item.quantity}, "updatedAt" = now()
