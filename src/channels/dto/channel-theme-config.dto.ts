@@ -128,13 +128,13 @@ export class ChannelThemeConfigDto {
   minimumOrderAmount?: number;
 
   // The storefront cart's stacked spend-more nudges, e.g.
-  // { amount: 1300, description: 'ফ্রি ডেলিভারি' },
-  // { amount: 2000, description: '১০% ছাড়' } — the cart drawer shows a
-  // progress bar toward whichever is next, and a standing "অভিনন্দন…"
-  // success bar for each one already reached (stacked, lowest amount
-  // first). Purely informational, same as trustBadges' free-delivery text —
-  // nothing here computes or applies an actual discount/fee waiver.
-  // Omitted/empty shows nothing.
+  // { amount: 1300, description: 'ফ্রি ডেলিভারি', freeDelivery: true },
+  // { amount: 2000, description: '১০% ছাড়', discountPercent: 10 } — the cart
+  // drawer shows a progress bar toward whichever is next, and a standing
+  // "অভিনন্দন…" success bar for each one already reached (stacked, lowest
+  // amount first). `description` is just display text; `discountPercent`
+  // and `freeDelivery` are real — see SpendingRewardDto. Omitted/empty
+  // shows nothing.
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(10)
@@ -154,4 +154,14 @@ export class ChannelThemeConfigDto {
   @ValidateNested({ each: true })
   @Type(() => QuantityDiscountDto)
   quantityDiscounts?: QuantityDiscountDto[];
+
+  // The flat delivery charge (taka) the cart drawer and the real order
+  // both add, unless the order already qualifies for a spendingRewards
+  // tier with `freeDelivery` on — then it's waived in both places.
+  // Omitted/0 means no delivery charge is ever added (same as today,
+  // before this field existed).
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  deliveryCharge?: number;
 }

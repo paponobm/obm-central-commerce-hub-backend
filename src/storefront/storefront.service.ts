@@ -77,6 +77,7 @@ export class StorefrontService {
       amount?: number;
       description?: string;
       discountPercent?: number;
+      freeDelivery?: boolean;
     };
     type RawQuantityDiscount = {
       quantity?: number;
@@ -98,6 +99,7 @@ export class StorefrontService {
       minimumOrderAmount?: number;
       spendingRewards?: RawSpendingReward[];
       quantityDiscounts?: RawQuantityDiscount[];
+      deliveryCharge?: number;
     } | null;
 
     const toPublicCoupon = (c?: RawCoupon) =>
@@ -154,6 +156,7 @@ export class StorefrontService {
         amount: r.amount as number,
         description: r.description as string,
         ...(r.discountPercent ? { discountPercent: r.discountPercent } : {}),
+        ...(r.freeDelivery ? { freeDelivery: true } : {}),
       }))
       .sort((a, b) => a.amount - b.amount);
 
@@ -186,6 +189,7 @@ export class StorefrontService {
       minimumOrderAmount: theme?.minimumOrderAmount || null,
       spendingRewards,
       quantityDiscounts,
+      deliveryCharge: theme?.deliveryCharge || null,
     };
   }
 
@@ -355,8 +359,13 @@ export class StorefrontService {
   async createOrder(channel: Channel, dto: StorefrontCreateOrderDto) {
     const theme = channel.themeConfig as {
       minimumOrderAmount?: number;
-      spendingRewards?: { amount?: number; discountPercent?: number }[];
+      spendingRewards?: {
+        amount?: number;
+        discountPercent?: number;
+        freeDelivery?: boolean;
+      }[];
       quantityDiscounts?: { quantity?: number; discountPercent?: number }[];
+      deliveryCharge?: number;
     } | null;
     const quantityTiers = (theme?.quantityDiscounts ?? [])
       .filter((t) => (t.quantity ?? 0) >= 2 && (t.discountPercent ?? 0) > 0)
@@ -435,6 +444,16 @@ export class StorefrontService {
       ? Math.round((subtotal * qualifyingDiscountPercent) / 100)
       : 0;
 
+    // Settings → Other Settings → Delivery charge — waived whenever any
+    // spendingRewards tier the subtotal qualifies for has `freeDelivery` on.
+    const qualifiesForFreeDelivery = (theme?.spendingRewards ?? []).some(
+      (r) => (r.amount ?? 0) <= subtotal && r.freeDelivery,
+    );
+    const shippingFee =
+      theme?.deliveryCharge && !qualifiesForFreeDelivery
+        ? theme.deliveryCharge
+        : 0;
+
     const order = await this.ordersService.createOrder(
       {
         source: 'WEBSITE',
@@ -452,6 +471,7 @@ export class StorefrontService {
         paymentMethod: dto.paymentMethod,
         notes: dto.notes,
         discount,
+        shippingFee,
         isPaid: false,
       },
       undefined,
