@@ -1,8 +1,10 @@
 import {
   ArrayMaxSize,
   IsArray,
+  IsNumber,
   IsOptional,
   IsString,
+  Min,
   MaxLength,
   ValidateNested,
 } from 'class-validator';
@@ -15,6 +17,8 @@ import { FlashSaleDto } from './flash-sale.dto';
 import { ReviewDto } from './review.dto';
 import { HealthTipDto } from './health-tip.dto';
 import { SocialLinkDto } from './social-link.dto';
+import { SpendingRewardDto } from './spending-reward.dto';
+import { QuantityDiscountDto } from './quantity-discount.dto';
 
 // Grows as more per-storefront cosmetic config lands (WhatsApp number,
 // etc.) — each a validated optional sub-object here, merged (not replaced)
@@ -113,4 +117,41 @@ export class ChannelThemeConfigDto {
   @ValidateNested({ each: true })
   @Type(() => SocialLinkDto)
   socialLinks?: SocialLinkDto[];
+
+  // The storefront cart's minimum order gate, in taka — the cart drawer
+  // nudges the customer toward it, and StorefrontService.createOrder
+  // rejects any order whose server-computed subtotal falls short.
+  // Omitted/0 means no minimum.
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  minimumOrderAmount?: number;
+
+  // The storefront cart's stacked spend-more nudges, e.g.
+  // { amount: 1300, description: 'ফ্রি ডেলিভারি' },
+  // { amount: 2000, description: '১০% ছাড়' } — the cart drawer shows a
+  // progress bar toward whichever is next, and a standing "অভিনন্দন…"
+  // success bar for each one already reached (stacked, lowest amount
+  // first). Purely informational, same as trustBadges' free-delivery text —
+  // nothing here computes or applies an actual discount/fee waiver.
+  // Omitted/empty shows nothing.
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(10)
+  @ValidateNested({ each: true })
+  @Type(() => SpendingRewardDto)
+  spendingRewards?: SpendingRewardDto[];
+
+  // The product page's buy-box quantity tiers (and the cart drawer's "আর
+  // ১টা নিলে …" hint) — e.g. { quantity: 2, discountPercent: 5 },
+  // { quantity: 3, discountPercent: 10 }. Real: StorefrontService recomputes
+  // and applies it server-side per line on order creation, same as
+  // spendingRewards' discountPercent. Omitted/empty means every product's
+  // buy-box only ever shows the single, undiscounted quantity-1 tile.
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(10)
+  @ValidateNested({ each: true })
+  @Type(() => QuantityDiscountDto)
+  quantityDiscounts?: QuantityDiscountDto[];
 }

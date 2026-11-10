@@ -1,4 +1,8 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { Channel, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { OrdersService } from '../orders/orders.service';
@@ -69,6 +73,16 @@ export class StorefrontService {
       enabled?: boolean;
     };
     type RawSocialLink = { platform?: string; url?: string };
+    type RawSpendingReward = {
+      amount?: number;
+      description?: string;
+      discountPercent?: number;
+    };
+    type RawQuantityDiscount = {
+      quantity?: number;
+      discountPercent?: number;
+      description?: string;
+    };
     const theme = channel.themeConfig as {
       heroCoupon?: RawCoupon;
       heroSlides?: {
@@ -81,6 +95,9 @@ export class StorefrontService {
       comboBanners?: RawComboBanner[];
       customerCarePhone?: string;
       socialLinks?: RawSocialLink[];
+      minimumOrderAmount?: number;
+      spendingRewards?: RawSpendingReward[];
+      quantityDiscounts?: RawQuantityDiscount[];
     } | null;
 
     const toPublicCoupon = (c?: RawCoupon) =>
@@ -128,6 +145,30 @@ export class StorefrontService {
       .filter((s) => s.platform?.trim() && s.url?.trim())
       .map((s) => ({ platform: s.platform as string, url: s.url as string }));
 
+    // Lowest amount first — the cart drawer walks this in order to decide
+    // which ones are already met (stacked success bars) vs. the next one
+    // still in progress.
+    const spendingRewards = (theme?.spendingRewards ?? [])
+      .filter((r) => r.description?.trim() && (r.amount ?? 0) > 0)
+      .map((r) => ({
+        amount: r.amount as number,
+        description: r.description as string,
+        ...(r.discountPercent ? { discountPercent: r.discountPercent } : {}),
+      }))
+      .sort((a, b) => a.amount - b.amount);
+
+    // Lowest quantity first — the product page's buy-box walks this to
+    // build its tiles (1, then one per configured quantity), and the cart
+    // drawer uses the same order to find "the next tier" for its hint.
+    const quantityDiscounts = (theme?.quantityDiscounts ?? [])
+      .filter((q) => (q.quantity ?? 0) >= 2 && (q.discountPercent ?? 0) > 0)
+      .map((q) => ({
+        quantity: q.quantity as number,
+        discountPercent: q.discountPercent as number,
+        ...(q.description?.trim() ? { description: q.description.trim() } : {}),
+      }))
+      .sort((a, b) => a.quantity - b.quantity);
+
     return {
       name: channel.name,
       logoUrl: channel.logoUrl,
@@ -142,6 +183,9 @@ export class StorefrontService {
       comboBanners,
       customerCarePhone: theme?.customerCarePhone?.trim() || null,
       socialLinks,
+      minimumOrderAmount: theme?.minimumOrderAmount || null,
+      spendingRewards,
+      quantityDiscounts,
     };
   }
 
@@ -309,6 +353,28 @@ export class StorefrontService {
   // price field at all, so OrdersService always derives price from this
   // channel's ProductChannel.price server-side, never from client input.
   async createOrder(channel: Channel, dto: StorefrontCreateOrderDto) {
+    const theme = channel.themeConfig as {
+      minimumOrderAmount?: number;
+      spendingRewards?: { amount?: number; discountPercent?: number }[];
+      quantityDiscounts?: { quantity?: number; discountPercent?: number }[];
+    } | null;
+    const quantityTiers = (theme?.quantityDiscounts ?? [])
+      .filter((t) => (t.quantity ?? 0) >= 2 && (t.discountPercent ?? 0) > 0)
+      .map((t) => ({
+        quantity: t.quantity as number,
+        discountPercent: t.discountPercent as number,
+      }));
+
+    // Server-authoritative subtotal for the minimum-order gate below — never
+    // trusts a client-sent amount, same reasoning as the price-derivation
+    // comment above: a variant line prices off its own basePrice (no
+    // channel override exists for variants), everything else off this
+    // channel's ProductChannel.price. Also where each line's own quantity-
+    // tier discount (Settings → Other Settings → Quantity discounts) gets
+    // computed — the highest-quantity tier that line's quantity reaches
+    // wins (not stacked), same "best tier" rule as spendingRewards.
+    let subtotal = 0;
+    const lineDiscounts: number[] = [];
     for (const item of dto.items) {
       const pc = await this.prisma.productChannel.findUnique({
         where: {
@@ -329,7 +395,45 @@ export class StorefrontService {
           `Product ${item.productId} is not available on this storefront`,
         );
       }
+      let unitPrice = toNumber(pc.price);
+      if (item.variantId) {
+        const variant = await this.prisma.productVariant.findUnique({
+          where: { id: item.variantId },
+        });
+        if (variant) unitPrice = toNumber(variant.basePrice);
+      }
+      subtotal += unitPrice * item.quantity;
+
+      const qtyTier = quantityTiers
+        .filter((t) => t.quantity <= item.quantity)
+        .sort((a, b) => b.quantity - a.quantity)[0];
+      lineDiscounts.push(
+        qtyTier
+          ? Math.round(
+              (unitPrice * item.quantity * qtyTier.discountPercent) / 100,
+            )
+          : 0,
+      );
     }
+
+    if (theme?.minimumOrderAmount && subtotal < theme.minimumOrderAmount) {
+      throw new BadRequestException(
+        `সর্বনিম্ন অর্ডার ৳${theme.minimumOrderAmount}। আরও ৳${theme.minimumOrderAmount - subtotal} এর পণ্য যোগ করুন।`,
+      );
+    }
+
+    // Settings → Other Settings → Spend-more rewards' discountPercent — the
+    // one part of that config that's real, not just cart-drawer copy. The
+    // highest-amount tier the subtotal actually qualifies for wins (not
+    // summed across tiers); untouched if none of them set a percent.
+    const qualifyingDiscountPercent = (theme?.spendingRewards ?? [])
+      .filter(
+        (r) => (r.amount ?? 0) <= subtotal && (r.discountPercent ?? 0) > 0,
+      )
+      .sort((a, b) => (b.amount ?? 0) - (a.amount ?? 0))[0]?.discountPercent;
+    const discount = qualifyingDiscountPercent
+      ? Math.round((subtotal * qualifyingDiscountPercent) / 100)
+      : 0;
 
     const order = await this.ordersService.createOrder(
       {
@@ -339,13 +443,15 @@ export class StorefrontService {
         customerPhone: dto.customerPhone,
         customerEmail: dto.customerEmail,
         shippingAddress: dto.shippingAddress,
-        items: dto.items.map((i) => ({
+        items: dto.items.map((i, idx) => ({
           productId: i.productId,
           variantId: i.variantId,
           quantity: i.quantity,
+          discount: lineDiscounts[idx],
         })),
         paymentMethod: dto.paymentMethod,
         notes: dto.notes,
+        discount,
         isPaid: false,
       },
       undefined,
