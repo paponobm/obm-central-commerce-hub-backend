@@ -19,6 +19,7 @@ import { HealthTipDto } from './health-tip.dto';
 import { SocialLinkDto } from './social-link.dto';
 import { SpendingRewardDto } from './spending-reward.dto';
 import { QuantityDiscountDto } from './quantity-discount.dto';
+import { CouponDto } from './coupon.dto';
 
 // Grows as more per-storefront cosmetic config lands (WhatsApp number,
 // etc.) — each a validated optional sub-object here, merged (not replaced)
@@ -164,4 +165,16 @@ export class ChannelThemeConfigDto {
   @IsNumber()
   @Min(0)
   deliveryCharge?: number;
+
+  // Settings → Other Settings → Coupons — admin-defined codes a customer
+  // can type at checkout for a real, server-enforced percent off (see
+  // CouponDto). Checked together with the hero banner's own coupon code
+  // above (StorefrontService.createOrder merges both). Omitted/empty means
+  // the checkout coupon field never matches anything.
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(30)
+  @ValidateNested({ each: true })
+  @Type(() => CouponDto)
+  coupons?: CouponDto[];
 }

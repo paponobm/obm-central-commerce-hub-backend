@@ -2,8 +2,12 @@ import {
   ArrayMaxSize,
   IsArray,
   IsBoolean,
+  IsNumber,
+  IsOptional,
   IsString,
+  Max,
   MaxLength,
+  Min,
   ValidateNested,
 } from 'class-validator';
 import { Type } from 'class-transformer';
@@ -24,6 +28,28 @@ export class ComboTierDto {
   // never shown on the storefront — same convention as trust badges.
   @IsBoolean()
   enabled: boolean;
+
+  // The real discount this tier applies (e.g. 6 for "+ ৬% ছাড়"), off the
+  // amount parsed from `title` (e.g. "৳১,২০০+" -> 1200). Checked against the
+  // combo-builder group's own server-computed subtotal when the order is
+  // actually created (StorefrontService.createOrder) — the only thing that
+  // discounts a combo line (its own quantity-tier discount never also
+  // applies once it's in a combo). Optional/0 keeps the card purely
+  // informational, same as before this field existed.
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(100)
+  discountPercent?: number;
+
+  // Waives Settings → Other Settings → Delivery charge for the whole order
+  // once this combo group's own subtotal reaches this tier — same real
+  // server-enforced waiver as a spend-more reward's own `freeDelivery` (see
+  // SpendingRewardDto). Optional/false keeps the card's "ফ্রি ডেলিভারি" text
+  // purely cosmetic, same as before this field existed.
+  @IsOptional()
+  @IsBoolean()
+  freeDelivery?: boolean;
 }
 
 export class ComboBannerDto {

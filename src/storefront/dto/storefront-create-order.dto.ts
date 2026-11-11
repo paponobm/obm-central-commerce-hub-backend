@@ -6,6 +6,7 @@ import {
   IsEnum,
   IsOptional,
   IsString,
+  MaxLength,
   MinLength,
   ValidateNested,
 } from 'class-validator';
@@ -42,4 +43,13 @@ export class StorefrontCreateOrderDto {
   @IsOptional()
   @IsString()
   notes?: string;
+
+  // The code typed into the checkout coupon field, if any. Matched
+  // case-insensitively server-side (StorefrontService.createOrder) against
+  // the channel's configured coupons — never trusted for the discount
+  // amount itself, only as a lookup key.
+  @IsOptional()
+  @IsString()
+  @MaxLength(20)
+  couponCode?: string;
 }

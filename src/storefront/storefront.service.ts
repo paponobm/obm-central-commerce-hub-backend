@@ -51,7 +51,12 @@ export class StorefrontService {
   // request). themeConfig itself is internal shape; only known, validated
   // sub-keys are ever surfaced, and only when their own enabled flag is set.
   getConfig(channel: Channel) {
-    type RawCoupon = { enabled: boolean; label: string; code: string };
+    type RawCoupon = {
+      enabled: boolean;
+      label: string;
+      code: string;
+      discountPercent?: number;
+    };
     // Older saves stored trustBadges as plain strings (fixed 4 slots, no
     // icon choice) or objects without an `enabled` flag yet; normalized
     // below so a channel saved before an upgrade still renders correctly
@@ -64,6 +69,8 @@ export class StorefrontService {
       title?: string;
       description?: string;
       enabled?: boolean;
+      discountPercent?: number;
+      freeDelivery?: boolean;
     };
     type RawComboBanner = {
       newBadge?: boolean;
@@ -84,6 +91,11 @@ export class StorefrontService {
       discountPercent?: number;
       description?: string;
     };
+    type RawCouponEntry = {
+      code?: string;
+      discountPercent?: number;
+      description?: string;
+    };
     const theme = channel.themeConfig as {
       heroCoupon?: RawCoupon;
       heroSlides?: {
@@ -100,6 +112,7 @@ export class StorefrontService {
       spendingRewards?: RawSpendingReward[];
       quantityDiscounts?: RawQuantityDiscount[];
       deliveryCharge?: number;
+      coupons?: RawCouponEntry[];
     } | null;
 
     const toPublicCoupon = (c?: RawCoupon) =>
@@ -140,6 +153,10 @@ export class StorefrontService {
           .map((t) => ({
             title: t.title ?? '',
             description: t.description ?? '',
+            ...(t.discountPercent
+              ? { discountPercent: t.discountPercent }
+              : {}),
+            ...(t.freeDelivery ? { freeDelivery: true } : {}),
           })),
       }));
 
@@ -190,7 +207,84 @@ export class StorefrontService {
       spendingRewards,
       quantityDiscounts,
       deliveryCharge: theme?.deliveryCharge || null,
+      // The merged, de-duplicated coupon list (hero banner + Other
+      // Settings), so the storefront can validate a typed code and compute
+      // its discount client-side the same way it already does for
+      // spendingRewards/quantityDiscounts — createOrder recomputes the same
+      // thing server-side rather than trusting this display.
+      coupons: [...this.getCouponMap(theme).values()],
     };
+  }
+
+  // One shared code → discountPercent lookup, built the same way for both
+  // getConfig (display) and createOrder (the real charge) so the two can
+  // never drift apart — the same reasoning that fixed the gross/net
+  // subtotal mismatch elsewhere in this service. Merges the hero banner's
+  // own coupon (default + each slide's override) with the Other Settings
+  // coupons list; later entries don't overwrite earlier ones with the same
+  // code, so the hero banner's rate wins over a same-named Other Settings
+  // row.
+  private getCouponMap(
+    theme: {
+      heroCoupon?: {
+        enabled?: boolean;
+        code?: string;
+        discountPercent?: number;
+      };
+      heroSlides?: {
+        coupon?: { enabled?: boolean; code?: string; discountPercent?: number };
+      }[];
+      coupons?: {
+        code?: string;
+        discountPercent?: number;
+        description?: string;
+      }[];
+    } | null,
+  ): Map<
+    string,
+    { code: string; discountPercent: number; description?: string }
+  > {
+    const map = new Map<
+      string,
+      { code: string; discountPercent: number; description?: string }
+    >();
+    const add = (
+      code?: string,
+      discountPercent?: number,
+      description?: string,
+    ) => {
+      const normalized = code?.trim().toUpperCase();
+      if (!normalized || !discountPercent || discountPercent <= 0) return;
+      if (map.has(normalized)) return;
+      map.set(normalized, {
+        code: normalized,
+        discountPercent,
+        ...(description?.trim() ? { description: description.trim() } : {}),
+      });
+    };
+    if (theme?.heroCoupon?.enabled) {
+      add(theme.heroCoupon.code, theme.heroCoupon.discountPercent);
+    }
+    for (const slide of theme?.heroSlides ?? []) {
+      if (slide.coupon?.enabled) {
+        add(slide.coupon.code, slide.coupon.discountPercent);
+      }
+    }
+    for (const c of theme?.coupons ?? []) {
+      add(c.code, c.discountPercent, c.description);
+    }
+    return map;
+  }
+
+  // The combo-builder's pricing-tier amount lives only as admin-entered,
+  // Bengali-digit free text (e.g. "৳১,২০০+") — there's no separate numeric
+  // field. Mirrors the storefront's own bnToNumber (lib/bn-digits.ts) so the
+  // server parses the exact same amount the customer saw qualify.
+  private parseTierAmount(title?: string): number {
+    const digits = (title ?? '')
+      .replace(/[০-৯]/g, (d) => String('০১২৩৪৫৬৭৮৯'.indexOf(d)))
+      .replace(/[^0-9]/g, '');
+    return digits ? parseInt(digits, 10) : 0;
   }
 
   // Categories are a shared, global taxonomy in this schema (not
@@ -366,6 +460,27 @@ export class StorefrontService {
       }[];
       quantityDiscounts?: { quantity?: number; discountPercent?: number }[];
       deliveryCharge?: number;
+      heroCoupon?: {
+        enabled?: boolean;
+        code?: string;
+        discountPercent?: number;
+      };
+      heroSlides?: {
+        coupon?: { enabled?: boolean; code?: string; discountPercent?: number };
+      }[];
+      coupons?: {
+        code?: string;
+        discountPercent?: number;
+        description?: string;
+      }[];
+      comboBanners?: {
+        tiers?: {
+          title?: string;
+          discountPercent?: number;
+          freeDelivery?: boolean;
+          enabled?: boolean;
+        }[];
+      }[];
     } | null;
     const quantityTiers = (theme?.quantityDiscounts ?? [])
       .filter((t) => (t.quantity ?? 0) >= 2 && (t.discountPercent ?? 0) > 0)
@@ -383,7 +498,16 @@ export class StorefrontService {
     // computed — the highest-quantity tier that line's quantity reaches
     // wins (not stacked), same "best tier" rule as spendingRewards.
     let subtotal = 0;
+    // Everything EXCEPT combo-builder items — spend-more rewards, the
+    // delivery-charge waiver and coupons are all based on this, never the
+    // full `subtotal` above. A combo already has its own bundle pricing
+    // (Settings → Home Page Combo → Pricing tier cards); letting its value
+    // also count toward "spend ৳1,300 get free delivery" or a coupon would
+    // double-discount the same taka. minimumOrderAmount still gates on the
+    // full `subtotal` — that's "can you check out at all", not a reward.
+    let standaloneSubtotal = 0;
     const lineDiscounts: number[] = [];
+    const unitPrices: number[] = [];
     for (const item of dto.items) {
       const pc = await this.prisma.productChannel.findUnique({
         where: {
@@ -412,10 +536,17 @@ export class StorefrontService {
         if (variant) unitPrice = toNumber(variant.basePrice);
       }
       subtotal += unitPrice * item.quantity;
+      if (!item.comboGroupId) standaloneSubtotal += unitPrice * item.quantity;
+      unitPrices.push(unitPrice);
 
-      const qtyTier = quantityTiers
-        .filter((t) => t.quantity <= item.quantity)
-        .sort((a, b) => b.quantity - a.quantity)[0];
+      // Combo-builder lines never get the generic per-product quantity-tier
+      // discount — once an item joins a combo, the combo's own tiers
+      // (below) are the only thing that discounts it.
+      const qtyTier = item.comboGroupId
+        ? undefined
+        : quantityTiers
+            .filter((t) => t.quantity <= item.quantity)
+            .sort((a, b) => b.quantity - a.quantity)[0];
       lineDiscounts.push(
         qtyTier
           ? Math.round(
@@ -424,6 +555,60 @@ export class StorefrontService {
           : 0,
       );
     }
+
+    // "Build your own combo" (ComboBuilder) — every line it adds shares the
+    // same client-assigned comboGroupId. Each group's own subtotal is
+    // recomputed here from the real unitPrices above (never the client's).
+    // Every pricing-tier card (first enabled combo banner — the only one the
+    // builder/cart ever use), discount or not, since a free-delivery-only
+    // tier (no discountPercent) still needs to be checked for the waiver
+    // below.
+    const allComboTiers = (theme?.comboBanners?.[0]?.tiers ?? [])
+      .filter((t) => t.enabled ?? true)
+      .map((t) => ({
+        amount: this.parseTierAmount(t.title),
+        discountPercent: t.discountPercent,
+        freeDelivery: t.freeDelivery,
+      }));
+    const comboGroupIds = [
+      ...new Set(
+        dto.items.map((i) => i.comboGroupId).filter((id): id is string => !!id),
+      ),
+    ];
+    const groupSubtotals = new Map<string, number>();
+    dto.items.forEach((item, idx) => {
+      if (!item.comboGroupId) return;
+      groupSubtotals.set(
+        item.comboGroupId,
+        (groupSubtotals.get(item.comboGroupId) ?? 0) +
+          unitPrices[idx] * item.quantity,
+      );
+    });
+    // The highest-amount tier each group's own subtotal reaches sets that
+    // group's discount, replacing the (always-zero, see above) line
+    // discount pushed for it a moment ago.
+    dto.items.forEach((item, idx) => {
+      if (!item.comboGroupId) return;
+      const groupSubtotal = groupSubtotals.get(item.comboGroupId) ?? 0;
+      const comboPercent =
+        allComboTiers
+          .filter(
+            (t) => groupSubtotal >= t.amount && (t.discountPercent ?? 0) > 0,
+          )
+          .sort((a, b) => b.amount - a.amount)[0]?.discountPercent ?? 0;
+      lineDiscounts[idx] = Math.round(
+        (unitPrices[idx] * item.quantity * comboPercent) / 100,
+      );
+    });
+    // Any combo group reaching a tier with `freeDelivery` on waives the
+    // order's one flat delivery charge entirely — same real waiver a
+    // spend-more reward's own freeDelivery gives, see below.
+    const comboFreeDelivery = comboGroupIds.some((groupId) => {
+      const groupSubtotal = groupSubtotals.get(groupId) ?? 0;
+      return allComboTiers.some(
+        (t) => groupSubtotal >= t.amount && t.freeDelivery,
+      );
+    });
 
     if (theme?.minimumOrderAmount && subtotal < theme.minimumOrderAmount) {
       throw new BadRequestException(
@@ -435,20 +620,41 @@ export class StorefrontService {
     // one part of that config that's real, not just cart-drawer copy. The
     // highest-amount tier the subtotal actually qualifies for wins (not
     // summed across tiers); untouched if none of them set a percent.
-    const qualifyingDiscountPercent = (theme?.spendingRewards ?? [])
-      .filter(
-        (r) => (r.amount ?? 0) <= subtotal && (r.discountPercent ?? 0) > 0,
-      )
-      .sort((a, b) => (b.amount ?? 0) - (a.amount ?? 0))[0]?.discountPercent;
-    const discount = qualifyingDiscountPercent
-      ? Math.round((subtotal * qualifyingDiscountPercent) / 100)
+    const qualifyingDiscountPercent =
+      (theme?.spendingRewards ?? [])
+        .filter(
+          (r) =>
+            (r.amount ?? 0) <= standaloneSubtotal &&
+            (r.discountPercent ?? 0) > 0,
+        )
+        .sort((a, b) => (b.amount ?? 0) - (a.amount ?? 0))[0]
+        ?.discountPercent ?? 0;
+
+    // The checkout coupon code, if any — matched against the same merged
+    // hero-banner + Other Settings lookup getConfig exposes to the
+    // storefront, so what the customer saw applied is exactly what's
+    // charged here. Doesn't stack with the reward-tier percent above: the
+    // better of the two wins, same "best tier, not summed" rule as every
+    // other discount in this method.
+    const couponEntry = dto.couponCode
+      ? this.getCouponMap(theme).get(dto.couponCode.trim().toUpperCase())
+      : undefined;
+    const bestDiscountPercent = Math.max(
+      qualifyingDiscountPercent,
+      couponEntry?.discountPercent ?? 0,
+    );
+    const discount = bestDiscountPercent
+      ? Math.round((standaloneSubtotal * bestDiscountPercent) / 100)
       : 0;
 
     // Settings → Other Settings → Delivery charge — waived whenever any
-    // spendingRewards tier the subtotal qualifies for has `freeDelivery` on.
-    const qualifiesForFreeDelivery = (theme?.spendingRewards ?? []).some(
-      (r) => (r.amount ?? 0) <= subtotal && r.freeDelivery,
-    );
+    // spendingRewards tier the standalone (non-combo) subtotal qualifies for
+    // has `freeDelivery` on, OR any combo group's own subtotal reached a
+    // pricing-tier card with `freeDelivery` on (comboFreeDelivery above).
+    const qualifiesForFreeDelivery =
+      (theme?.spendingRewards ?? []).some(
+        (r) => (r.amount ?? 0) <= standaloneSubtotal && r.freeDelivery,
+      ) || comboFreeDelivery;
     const shippingFee =
       theme?.deliveryCharge && !qualifiesForFreeDelivery
         ? theme.deliveryCharge
