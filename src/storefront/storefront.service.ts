@@ -899,6 +899,72 @@ export class StorefrontService {
     return { items };
   }
 
+  // The storefront's symptom-finder quiz (Settings → Badge & Category →
+  // Problem): each problem's each sub-category holds admin-curated product
+  // ids, resolved against this channel's live, published products at read
+  // time — same resolution rule as getFlashSale/getCartSuggestions above.
+  // One query for every id across every problem/sub, not one per sub, since
+  // a channel can have dozens of sub-categories.
+  async getQuiz(channel: Channel) {
+    type RawQuizSub = {
+      label?: string;
+      description?: string;
+      productIds?: string[];
+    };
+    type RawQuizProblem = {
+      label?: string;
+      description?: string;
+      subs?: RawQuizSub[];
+    };
+    const theme = channel.themeConfig as {
+      quizProblems?: RawQuizProblem[];
+    } | null;
+    const problems = (theme?.quizProblems ?? []).filter((p) => p.label?.trim());
+    if (problems.length === 0) {
+      return { problems: [] };
+    }
+
+    const allIds = [
+      ...new Set(
+        problems.flatMap((p) =>
+          (p.subs ?? []).flatMap((s) => s.productIds ?? []),
+        ),
+      ),
+    ];
+
+    const rows =
+      allIds.length === 0
+        ? []
+        : await this.prisma.productChannel.findMany({
+            where: {
+              channelId: channel.id,
+              isPublished: true,
+              productId: { in: allIds },
+              product: { isActive: true, deletedAt: null },
+            },
+            ...productChannelWithProduct,
+            relationLoadStrategy: 'join',
+          });
+    const byId = new Map(rows.map((r) => [r.productId, r]));
+
+    return {
+      problems: problems.map((p) => ({
+        label: p.label as string,
+        description: p.description ?? '',
+        subs: (p.subs ?? [])
+          .filter((s) => s.label?.trim())
+          .map((s) => ({
+            label: s.label as string,
+            description: s.description ?? '',
+            items: (s.productIds ?? [])
+              .map((id) => byId.get(id))
+              .filter((r): r is ProductChannelWithProduct => !!r)
+              .map((pc) => this.toPublicProduct(pc)),
+          })),
+      })),
+    };
+  }
+
   // "কাস্টমারদের অভিজ্ঞতা" — admin-entered testimonials (Settings → Review).
   // Each review's linked product, if any, is resolved against this
   // channel's live, published products at read time — same reasoning as

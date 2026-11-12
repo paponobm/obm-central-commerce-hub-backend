@@ -15,6 +15,7 @@ import { TrustBadgeDto } from './trust-badge.dto';
 import { ComboBannerDto } from './combo-banner.dto';
 import { FlashSaleDto } from './flash-sale.dto';
 import { CartSuggestionsDto } from './cart-suggestions.dto';
+import { QuizProblemDto } from './quiz-problem.dto';
 import { ReviewDto } from './review.dto';
 import { HealthTipDto } from './health-tip.dto';
 import { SocialLinkDto } from './social-link.dto';
@@ -89,6 +90,18 @@ export class ChannelThemeConfigDto {
   @ValidateNested()
   @Type(() => CartSuggestionsDto)
   cartSuggestions?: CartSuggestionsDto;
+
+  // The storefront's "কোনটা নেবেন বুঝছেন না?" symptom-finder quiz — Settings
+  // → Badge & Category → Problem. Each problem (e.g. "ব্যথা") holds its own
+  // sub-categories (e.g. "মাথাব্যথা বা মাইগ্রেন"), each with real product
+  // assignments — replaces the old hardcoded lib/quiz-data.ts list on the
+  // storefront. Omitted/empty means the quiz has no questions to show.
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(20)
+  @ValidateNested({ each: true })
+  @Type(() => QuizProblemDto)
+  quizProblems?: QuizProblemDto[];
 
   // Admin-entered customer testimonials — "কাস্টমারদের অভিজ্ঞতা" on the
   // homepage. Omitted/empty means the section doesn't render (no sample

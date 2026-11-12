@@ -43,6 +43,11 @@ export class StorefrontController {
     return this.storefrontService.getCartSuggestions(channel);
   }
 
+  @Get('quiz')
+  getQuiz(@CurrentChannel() channel: Channel) {
+    return this.storefrontService.getQuiz(channel);
+  }
+
   @Get('reviews')
   getReviews(@CurrentChannel() channel: Channel) {
     return this.storefrontService.getReviews(channel);
