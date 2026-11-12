@@ -1039,6 +1039,9 @@ export class StorefrontService {
       title?: string;
       categoryId?: string;
       readMinutes?: number;
+      description?: string;
+      points?: string[];
+      productIds?: string[];
       enabled?: boolean;
     };
     const theme = channel.themeConfig as { healthTips?: RawTip[] } | null;
@@ -1064,10 +1067,38 @@ export class StorefrontService {
       : [];
     const categoryById = new Map(categories.map((c) => [c.id, c.name]));
 
+    // One query for every product id across every tip, not one per tip —
+    // same reasoning as getQuiz's combined lookup.
+    const allProductIds = [...new Set(tips.flatMap((t) => t.productIds ?? []))];
+    const productRows = allProductIds.length
+      ? await this.prisma.productChannel.findMany({
+          where: {
+            channelId: channel.id,
+            isPublished: true,
+            productId: { in: allProductIds },
+            product: { isActive: true, deletedAt: null },
+          },
+          ...productChannelWithProduct,
+          relationLoadStrategy: 'join',
+        })
+      : [];
+    const productById = new Map(productRows.map((r) => [r.productId, r]));
+
     return tips.map((t) => ({
       title: t.title!.trim(),
+      // Only surfaced when it actually resolved above — a tip pointing at a
+      // deleted/unpublished category falls back to null for both, same
+      // honesty rule as the name itself.
+      categoryId:
+        t.categoryId && categoryById.has(t.categoryId) ? t.categoryId : null,
       category: t.categoryId ? (categoryById.get(t.categoryId) ?? null) : null,
       readMinutes: t.readMinutes ?? null,
+      description: t.description?.trim() || '',
+      points: (t.points ?? []).map((p) => p.trim()).filter(Boolean),
+      items: (t.productIds ?? [])
+        .map((id) => productById.get(id))
+        .filter((r): r is ProductChannelWithProduct => !!r)
+        .map((pc) => this.toPublicProduct(pc)),
     }));
   }
 }
