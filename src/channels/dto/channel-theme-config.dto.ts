@@ -14,6 +14,7 @@ import { HeroSlideDto } from './hero-slide.dto';
 import { TrustBadgeDto } from './trust-badge.dto';
 import { ComboBannerDto } from './combo-banner.dto';
 import { FlashSaleDto } from './flash-sale.dto';
+import { CartSuggestionsDto } from './cart-suggestions.dto';
 import { ReviewDto } from './review.dto';
 import { HealthTipDto } from './health-tip.dto';
 import { SocialLinkDto } from './social-link.dto';
@@ -81,6 +82,13 @@ export class ChannelThemeConfigDto {
   @ValidateNested()
   @Type(() => FlashSaleDto)
   flashSale?: FlashSaleDto;
+
+  // The storefront cart drawer's "Suggested Products for you" row — which
+  // products show, in what order. Omitted/empty means nothing shows there.
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => CartSuggestionsDto)
+  cartSuggestions?: CartSuggestionsDto;
 
   // Admin-entered customer testimonials — "কাস্টমারদের অভিজ্ঞতা" on the
   // homepage. Omitted/empty means the section doesn't render (no sample

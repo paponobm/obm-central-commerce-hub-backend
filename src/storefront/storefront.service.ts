@@ -864,6 +864,41 @@ export class StorefrontService {
     };
   }
 
+  // The cart drawer's "Suggested Products for you" row (Settings → Badge &
+  // Category → Cart Suggestions): admin-curated product ids, resolved
+  // against this channel's live, published products at read time — same
+  // resolution rule as getFlashSale above (a product that's since been
+  // unpublished, deactivated, or deleted just silently drops out).
+  async getCartSuggestions(channel: Channel) {
+    type RawCartSuggestions = { productIds?: string[] };
+    const theme = channel.themeConfig as {
+      cartSuggestions?: RawCartSuggestions;
+    } | null;
+    const productIds = theme?.cartSuggestions?.productIds ?? [];
+    if (productIds.length === 0) {
+      return { items: [] };
+    }
+
+    const rows = await this.prisma.productChannel.findMany({
+      where: {
+        channelId: channel.id,
+        isPublished: true,
+        productId: { in: productIds },
+        product: { isActive: true, deletedAt: null },
+      },
+      ...productChannelWithProduct,
+      relationLoadStrategy: 'join',
+    });
+
+    const byId = new Map(rows.map((r) => [r.productId, r]));
+    const items = productIds
+      .map((id) => byId.get(id))
+      .filter((r): r is ProductChannelWithProduct => !!r)
+      .map((pc) => this.toPublicProduct(pc));
+
+    return { items };
+  }
+
   // "কাস্টমারদের অভিজ্ঞতা" — admin-entered testimonials (Settings → Review).
   // Each review's linked product, if any, is resolved against this
   // channel's live, published products at read time — same reasoning as

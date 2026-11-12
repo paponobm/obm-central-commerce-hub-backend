@@ -38,6 +38,11 @@ export class StorefrontController {
     return this.storefrontService.getFlashSale(channel);
   }
 
+  @Get('cart-suggestions')
+  getCartSuggestions(@CurrentChannel() channel: Channel) {
+    return this.storefrontService.getCartSuggestions(channel);
+  }
+
   @Get('reviews')
   getReviews(@CurrentChannel() channel: Channel) {
     return this.storefrontService.getReviews(channel);
