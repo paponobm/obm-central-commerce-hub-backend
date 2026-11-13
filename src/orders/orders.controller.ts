@@ -76,8 +76,11 @@ export class OrdersController {
   // Declared before ':id' so 'checkout-leads' is not read as an order id.
   @Get('checkout-leads')
   @RequirePermissions('orders.view')
-  listCheckoutLeads(@CurrentUser() user: JwtPayload) {
-    return this.ordersService.listCheckoutLeads(user);
+  listCheckoutLeads(
+    @CurrentUser() user: JwtPayload,
+    @Query('channelId') channelId?: string,
+  ) {
+    return this.ordersService.listCheckoutLeads(user, channelId);
   }
 
   // Declared before ':id' for the same reason — 'by-number' has its own

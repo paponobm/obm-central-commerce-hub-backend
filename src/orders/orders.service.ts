@@ -588,9 +588,14 @@ export class OrdersService {
   }
 
   // Incomplete storefront checkouts (see StorefrontService.saveCheckoutLead),
-  // scoped to the user's stores like the order list.
-  async listCheckoutLeads(user: JwtPayload) {
-    const channelFilter = await this.channelScope.resolveDirectFilter(user);
+  // scoped to the user's stores like the order list — and, same as
+  // findAll's own channelId param, narrowed further to one specific store
+  // when the topbar's Store Selector has one active.
+  async listCheckoutLeads(user: JwtPayload, channelId?: string) {
+    const channelFilter = await this.channelScope.resolveDirectFilter(
+      user,
+      channelId,
+    );
     const leads = await this.prisma.checkoutLead.findMany({
       where: channelFilter,
       orderBy: { updatedAt: 'desc' },
