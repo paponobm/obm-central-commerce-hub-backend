@@ -14,6 +14,7 @@ import { HeroSlideDto } from './hero-slide.dto';
 import { TrustBadgeDto } from './trust-badge.dto';
 import { ComboBannerDto } from './combo-banner.dto';
 import { FlashSaleDto } from './flash-sale.dto';
+import { CheckoutUpsellDto } from './checkout-upsell.dto';
 import { CartSuggestionsDto } from './cart-suggestions.dto';
 import { QuizProblemDto } from './quiz-problem.dto';
 import { ReviewDto } from './review.dto';
@@ -83,6 +84,15 @@ export class ChannelThemeConfigDto {
   @ValidateNested()
   @Type(() => FlashSaleDto)
   flashSale?: FlashSaleDto;
+
+  // The order-confirmation page's "একই পার্সেলে যোগ করুন" upsell strip —
+  // Settings → Checkout Management. Which products show, the relative
+  // countdown length, and the extra discount percent advertised. Omitted
+  // means the section doesn't render.
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => CheckoutUpsellDto)
+  checkoutUpsell?: CheckoutUpsellDto;
 
   // The storefront cart drawer's "Suggested Products for you" row — which
   // products show, in what order. Omitted/empty means nothing shows there.

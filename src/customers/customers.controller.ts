@@ -70,6 +70,12 @@ export class CustomersController {
     return this.customersService.findOne(id, user);
   }
 
+  @Get(':id/activity')
+  @RequirePermissions('customers.view')
+  listActivity(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
+    return this.customersService.listCustomerActivity(id, user);
+  }
+
   @Post()
   @RequirePermissions('customers.manage')
   create(@Body() dto: CreateCustomerDto) {

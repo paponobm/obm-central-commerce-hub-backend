@@ -864,6 +864,57 @@ export class StorefrontService {
     };
   }
 
+  // The order-confirmation page's "একই পার্সেলে যোগ করুন" upsell strip —
+  // same admin-curated-ids-resolved-at-read-time pattern as getFlashSale,
+  // but the countdown is a relative duration (starts when the confirmation
+  // page loads) rather than one shared absolute deadline, since it's tied to
+  // each customer's own just-placed order, not a calendar sale.
+  async getCheckoutUpsell(channel: Channel) {
+    type RawCheckoutUpsell = {
+      enabled?: boolean;
+      durationMinutes?: number;
+      discountPercent?: number;
+      productIds?: string[];
+    };
+    const theme = channel.themeConfig as {
+      checkoutUpsell?: RawCheckoutUpsell;
+    } | null;
+    const checkoutUpsell = theme?.checkoutUpsell;
+    const productIds = checkoutUpsell?.productIds ?? [];
+    if (!checkoutUpsell?.enabled || productIds.length === 0) {
+      return {
+        enabled: false,
+        durationMinutes: 0,
+        discountPercent: 0,
+        items: [],
+      };
+    }
+
+    const rows = await this.prisma.productChannel.findMany({
+      where: {
+        channelId: channel.id,
+        isPublished: true,
+        productId: { in: productIds },
+        product: { isActive: true, deletedAt: null },
+      },
+      ...productChannelWithProduct,
+      relationLoadStrategy: 'join',
+    });
+
+    const byId = new Map(rows.map((r) => [r.productId, r]));
+    const items = productIds
+      .map((id) => byId.get(id))
+      .filter((r): r is ProductChannelWithProduct => !!r)
+      .map((pc) => this.toPublicProduct(pc));
+
+    return {
+      enabled: true,
+      durationMinutes: checkoutUpsell.durationMinutes ?? 15,
+      discountPercent: checkoutUpsell.discountPercent ?? 0,
+      items,
+    };
+  }
+
   // The cart drawer's "Suggested Products for you" row (Settings → Badge &
   // Category → Cart Suggestions): admin-curated product ids, resolved
   // against this channel's live, published products at read time — same

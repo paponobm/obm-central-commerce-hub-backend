@@ -106,6 +106,10 @@ function describeOrderLog(action: string, after: unknown): string {
       return `Customer response changed to ${(data.customerResponse ?? 'none').replaceAll('_', ' ')}`;
     case 'order.web_approved':
       return 'Approved from Web Orders';
+    case 'order.invoice_printed':
+      return 'Invoice printed';
+    case 'order.created_from_lead':
+      return 'Order created from an incomplete checkout';
     default:
       return action;
   }
@@ -265,10 +269,11 @@ export class OrdersService {
 
     const customerIds = orders.map((o) => o.customerId);
     const orderIds = orders.map((o) => o.id);
-    // The two lookups are independent, so they run together.
-    const [customerStats, auditFlags, adminNotes, lastActivity] =
+    // The lookups are independent, so they run together.
+    const [customerStats, orderSequence, auditFlags, adminNotes, lastActivity] =
       await Promise.all([
         this.getCustomerStats(customerIds),
+        this.getOrderSequenceNumbers(customerIds),
         this.getAuditFlags(orderIds, [
           'order.invoice_printed',
           'order.web_approved',
@@ -288,7 +293,7 @@ export class OrdersService {
         customer: {
           ...o.customer,
           successRate: stats?.successRate ?? null,
-          orderCount: stats?.orderCount ?? 0,
+          orderCount: orderSequence.get(o.id) ?? stats?.orderCount ?? 0,
         },
       };
     });
@@ -336,15 +341,17 @@ export class OrdersService {
     if (!order) {
       throw new NotFoundException(`No order found for "${orderNumber}"`);
     }
-    const [stats, flags, adminNotes, lastActivity] = await Promise.all([
-      this.getCustomerStats([order.customerId]),
-      this.getAuditFlags(
-        [order.id],
-        ['order.invoice_printed', 'order.web_approved'],
-      ),
-      this.getAdminNotes([order.id]),
-      this.getLastOrderActivity([order.id]),
-    ]);
+    const [stats, orderSequence, flags, adminNotes, lastActivity] =
+      await Promise.all([
+        this.getCustomerStats([order.customerId]),
+        this.getOrderSequenceNumbers([order.customerId]),
+        this.getAuditFlags(
+          [order.id],
+          ['order.invoice_printed', 'order.web_approved'],
+        ),
+        this.getAdminNotes([order.id]),
+        this.getLastOrderActivity([order.id]),
+      ]);
     const orderFlags = flags.get(order.id);
     return {
       ...order,
@@ -358,7 +365,10 @@ export class OrdersService {
       customer: {
         ...order.customer,
         successRate: stats.get(order.customerId)?.successRate ?? null,
-        orderCount: stats.get(order.customerId)?.orderCount ?? 0,
+        orderCount:
+          orderSequence.get(order.id) ??
+          stats.get(order.customerId)?.orderCount ??
+          0,
       },
     };
   }
@@ -759,6 +769,8 @@ export class OrdersService {
               'order.note',
               'order.customer_response_change',
               'order.web_approved',
+              'order.invoice_printed',
+              'order.created_from_lead',
             ],
           },
         },
@@ -1089,6 +1101,35 @@ export class OrdersService {
       });
     }
     return stats;
+  }
+
+  // Per-order (not per-customer) — which number this particular order was
+  // in that customer's own history, across every channel/source/status
+  // (same scope getCustomerStats' flat total already counted). The REPEAT
+  // tag on an order row shows this, not the customer's current grand
+  // total, so their 2nd order always reads REPEAT (2) and their 6th always
+  // reads REPEAT (6), instead of every one of their rows repeating
+  // whatever their count happens to be today.
+  private async getOrderSequenceNumbers(
+    customerIds: string[],
+  ): Promise<Map<string, number>> {
+    const sequence = new Map<string, number>();
+    const uniqueIds = [...new Set(customerIds)];
+    if (uniqueIds.length === 0) return sequence;
+
+    const allOrders = await this.prisma.order.findMany({
+      where: { customerId: { in: uniqueIds } },
+      select: { id: true, customerId: true },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    const perCustomerCount = new Map<string, number>();
+    for (const o of allOrders) {
+      const next = (perCustomerCount.get(o.customerId) ?? 0) + 1;
+      perCustomerCount.set(o.customerId, next);
+      sequence.set(o.id, next);
+    }
+    return sequence;
   }
 
   // The latest change to each order (status, customer response, note or
@@ -1476,6 +1517,7 @@ export class OrdersService {
             email: dto.customerEmail,
           },
           tx,
+          actorUserId,
         );
 
         const shippingName = dto.shippingName ?? customer.name;
@@ -1743,6 +1785,7 @@ export class OrdersService {
               email: dto.customerEmail,
             },
             tx,
+            actorUserId,
           );
           customerId = customer.id;
         }

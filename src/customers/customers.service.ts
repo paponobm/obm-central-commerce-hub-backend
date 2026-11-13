@@ -27,6 +27,26 @@ export interface ResolveCustomerInput {
   email?: string;
 }
 
+// Same describe-the-log-entry pattern as orders.service.ts's
+// describeOrderLog/describeLeadLog — only one action logged against a
+// Customer today, but kept as a switch (not inlined) so a future one slots
+// in the same way.
+function describeCustomerLog(
+  action: string,
+  before: unknown,
+  after: unknown,
+): string {
+  switch (action) {
+    case 'customer.name_change': {
+      const from = (before as { name?: string } | null)?.name ?? '';
+      const to = (after as { name?: string } | null)?.name ?? '';
+      return `Name changed from "${from}" to "${to}"`;
+    }
+    default:
+      return action;
+  }
+}
+
 @Injectable()
 export class CustomersService {
   constructor(
@@ -460,6 +480,36 @@ export class CustomersService {
     };
   }
 
+  // Everything logged against this customer, newest first — same shape
+  // (key/at/by/text) as listOrderActivity/listCheckoutLeadActivity in
+  // OrdersService, so the frontend can render it with the same timeline.
+  async listCustomerActivity(id: string, user: JwtPayload) {
+    await this.requireCustomer(id);
+    await this.assertVisible(user, id);
+    const logs = await this.prisma.auditLog.findMany({
+      where: {
+        entityType: 'Customer',
+        entityId: id,
+        action: { in: ['customer.name_change'] },
+      },
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true,
+        action: true,
+        before: true,
+        after: true,
+        createdAt: true,
+        user: { select: { name: true } },
+      },
+    });
+    return logs.map((l) => ({
+      key: `log-${l.id}`,
+      at: l.createdAt,
+      by: l.user?.name ?? null,
+      text: describeCustomerLog(l.action, l.before, l.after),
+    }));
+  }
+
   async update(id: string, dto: UpdateCustomerDto, user: JwtPayload) {
     await this.requireCustomer(id);
     await this.assertVisible(user, id);
@@ -489,9 +539,18 @@ export class CustomersService {
   // and only create a new row when the phone is genuinely new. Accepts an
   // optional transaction client so order creation can do this atomically
   // alongside the rest of the order.
+  //
+  // A repeat order under the same phone but a different name updates the
+  // customer's name to the latest one (not just the first one ever seen) —
+  // the newest name is the one most likely still accurate — and logs the
+  // change to AuditLog (entityType 'Customer') so it shows on the
+  // customer's own activity timeline, same pattern as Order/CheckoutLead.
+  // actorUserId is undefined for the public storefront checkout, which is
+  // fine — AuditLog.userId is optional.
   async resolveCustomer(
     input: ResolveCustomerInput,
     db: DbClient = this.prisma,
+    actorUserId?: string,
   ) {
     if (input.customerId) {
       const customer = await db.customer.findFirst({
@@ -513,6 +572,23 @@ export class CustomersService {
       where: { phone: input.phone },
     });
     if (existing) {
+      if (input.name && input.name.trim() && input.name !== existing.name) {
+        const updated = await db.customer.update({
+          where: { id: existing.id },
+          data: { name: input.name },
+        });
+        await db.auditLog.create({
+          data: {
+            userId: actorUserId,
+            action: 'customer.name_change',
+            entityType: 'Customer',
+            entityId: existing.id,
+            before: { name: existing.name },
+            after: { name: input.name },
+          },
+        });
+        return updated;
+      }
       return existing;
     }
 
