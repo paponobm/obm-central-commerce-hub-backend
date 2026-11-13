@@ -14,6 +14,7 @@ import { CurrentChannel } from './decorators/current-channel.decorator';
 import { StorefrontService } from './storefront.service';
 import { StorefrontCreateOrderDto } from './dto/storefront-create-order.dto';
 import { StorefrontCheckoutLeadDto } from './dto/storefront-checkout-lead.dto';
+import { StorefrontAddUpsellItemDto } from './dto/storefront-add-upsell-item.dto';
 
 // No JwtAuthGuard here — deliberately public. ChannelResolverGuard is the
 // only guard, and it's what keeps this whole surface channel-isolated
@@ -41,6 +42,19 @@ export class StorefrontController {
   @Get('checkout-upsell')
   getCheckoutUpsell(@CurrentChannel() channel: Channel) {
     return this.storefrontService.getCheckoutUpsell(channel);
+  }
+
+  @Post('orders/:orderId/upsell-items')
+  addUpsellItem(
+    @CurrentChannel() channel: Channel,
+    @Param('orderId') orderId: string,
+    @Body() dto: StorefrontAddUpsellItemDto,
+  ) {
+    return this.storefrontService.addUpsellItem(
+      channel,
+      orderId,
+      dto.productId,
+    );
   }
 
   @Get('cart-suggestions')

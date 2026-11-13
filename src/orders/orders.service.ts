@@ -110,6 +110,15 @@ function describeOrderLog(action: string, after: unknown): string {
       return 'Invoice printed';
     case 'order.created_from_lead':
       return 'Order created from an incomplete checkout';
+    case 'order.checkout_upsell_item_added': {
+      const upsell = after as {
+        productName?: string;
+        discountPercent?: number;
+      } | null;
+      return `Customer added ${upsell?.productName ?? 'a product'} from the checkout upsell strip${
+        upsell?.discountPercent ? ` (${upsell.discountPercent}% off)` : ''
+      }`;
+    }
     default:
       return action;
   }
@@ -771,6 +780,7 @@ export class OrdersService {
               'order.web_approved',
               'order.invoice_printed',
               'order.created_from_lead',
+              'order.checkout_upsell_item_added',
             ],
           },
         },
@@ -1843,6 +1853,119 @@ export class OrdersService {
               total: toNumber(order.total),
             },
             after: { subtotal, total },
+          },
+        });
+
+        return updated;
+      },
+      { timeout: 15000, maxWait: 5000 },
+    );
+  }
+
+  // The order-confirmation page's "একই পার্সেলে যোগ করুন" strip — adds one
+  // admin-curated product (Settings → Checkout Management) to an order the
+  // customer just placed, at that feature's advertised discount, with no
+  // added delivery charge (shippingFee is left exactly as it was). Called
+  // from the public, unauthenticated storefront API — channel ownership,
+  // order status, and the countdown window are all re-checked here
+  // server-side, never trusted from the client's own (cosmetic) timer.
+  async addCheckoutUpsellItem(
+    orderId: string,
+    channelId: string,
+    item: {
+      productId: string;
+      productName: string;
+      sku: string;
+      unitPrice: number;
+      discountPercent: number;
+      durationMinutes: number;
+    },
+  ) {
+    const order = await this.prisma.order.findUnique({
+      where: { id: orderId },
+      include: { items: true },
+    });
+    if (!order || order.channelId !== channelId) {
+      throw new NotFoundException(`Order ${orderId} not found`);
+    }
+    // Once approved (or moved past PENDING some other way), it's already
+    // being packed — same "no longer editable" line Web Orders itself draws.
+    if (order.status !== 'PENDING' || order.webApprovedAt) {
+      throw new BadRequestException(
+        'This order has already moved on to packing — it can no longer be added to.',
+      );
+    }
+    const deadline = new Date(
+      order.createdAt.getTime() + item.durationMinutes * 60_000,
+    );
+    if (new Date() > deadline) {
+      throw new BadRequestException('This offer has expired for this order.');
+    }
+
+    const lineDiscount = Math.round(
+      (item.unitPrice * item.discountPercent) / 100,
+    );
+    const lineTotal = item.unitPrice - lineDiscount;
+
+    return runTransaction(
+      this.prisma,
+      async (tx) => {
+        // Adding the same upsell product twice (e.g. a retried click)
+        // increases that one line's quantity rather than creating a
+        // duplicate row — same "merge into the existing line" behavior the
+        // cart itself uses before an order even exists.
+        const existing = order.items.find(
+          (i) => i.productId === item.productId && !i.variantId,
+        );
+        if (existing) {
+          await tx.orderItem.update({
+            where: { id: existing.id },
+            data: {
+              quantity: existing.quantity + 1,
+              discount: toNumber(existing.discount) + lineDiscount,
+              total: toNumber(existing.total) + lineTotal,
+            },
+          });
+        } else {
+          await tx.orderItem.create({
+            data: {
+              orderId: order.id,
+              productId: item.productId,
+              productName: item.productName,
+              sku: item.sku,
+              quantity: 1,
+              unitPrice: item.unitPrice,
+              discount: lineDiscount,
+              total: lineTotal,
+            },
+          });
+        }
+
+        const items = await tx.orderItem.findMany({
+          where: { orderId: order.id },
+        });
+        const subtotal = items.reduce((sum, i) => sum + toNumber(i.total), 0);
+        // shippingFee is read, never recomputed — this is exactly the "no
+        // added delivery charge" the strip advertises.
+        const total =
+          subtotal - toNumber(order.discount) + toNumber(order.shippingFee);
+
+        const updated = await tx.order.update({
+          where: { id: order.id },
+          data: { subtotal, total },
+          include: { items: true },
+        });
+
+        await tx.auditLog.create({
+          data: {
+            action: 'order.checkout_upsell_item_added',
+            entityType: 'Order',
+            entityId: order.id,
+            after: {
+              productId: item.productId,
+              productName: item.productName,
+              discountPercent: item.discountPercent,
+            },
           },
         });
 

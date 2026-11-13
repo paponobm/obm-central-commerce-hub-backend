@@ -915,6 +915,60 @@ export class StorefrontService {
     };
   }
 
+  // The "অর্ডারে যোগ করুন" click inside the checkout-upsell strip — validates
+  // the product is actually one of this channel's admin-curated upsell picks
+  // (never an arbitrary id), resolves its real current price here (never
+  // trusted from the client), then hands the order-ownership/status/
+  // countdown checks and the actual item-add to OrdersService.
+  async addUpsellItem(channel: Channel, orderId: string, productId: string) {
+    type RawCheckoutUpsell = {
+      enabled?: boolean;
+      durationMinutes?: number;
+      discountPercent?: number;
+      productIds?: string[];
+    };
+    const theme = channel.themeConfig as {
+      checkoutUpsell?: RawCheckoutUpsell;
+    } | null;
+    const checkoutUpsell = theme?.checkoutUpsell;
+    if (
+      !checkoutUpsell?.enabled ||
+      !checkoutUpsell.productIds?.includes(productId)
+    ) {
+      throw new NotFoundException(
+        `Product ${productId} is not part of this channel's checkout upsell`,
+      );
+    }
+
+    const pc = await this.prisma.productChannel.findUnique({
+      where: { productId_channelId: { productId, channelId: channel.id } },
+      include: {
+        product: {
+          select: { name: true, sku: true, isActive: true, deletedAt: true },
+        },
+      },
+    });
+    if (
+      !pc ||
+      !pc.isPublished ||
+      !pc.product.isActive ||
+      pc.product.deletedAt
+    ) {
+      throw new NotFoundException(
+        `Product ${productId} is not available on this storefront`,
+      );
+    }
+
+    return this.ordersService.addCheckoutUpsellItem(orderId, channel.id, {
+      productId,
+      productName: pc.product.name,
+      sku: pc.product.sku,
+      unitPrice: toNumber(pc.price),
+      discountPercent: checkoutUpsell.discountPercent ?? 0,
+      durationMinutes: checkoutUpsell.durationMinutes ?? 15,
+    });
+  }
+
   // The cart drawer's "Suggested Products for you" row (Settings → Badge &
   // Category → Cart Suggestions): admin-curated product ids, resolved
   // against this channel's live, published products at read time — same
