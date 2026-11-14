@@ -19,10 +19,12 @@ import { CartSuggestionsDto } from './cart-suggestions.dto';
 import { QuizProblemDto } from './quiz-problem.dto';
 import { ReviewDto } from './review.dto';
 import { HealthTipDto } from './health-tip.dto';
+import { PolicySectionDto } from './policy-section.dto';
 import { SocialLinkDto } from './social-link.dto';
 import { SpendingRewardDto } from './spending-reward.dto';
 import { QuantityDiscountDto } from './quantity-discount.dto';
 import { CouponDto } from './coupon.dto';
+import { VipCouponSettingsDto } from './vip-coupon-settings.dto';
 
 // Grows as more per-storefront cosmetic config lands (WhatsApp number,
 // etc.) — each a validated optional sub-object here, merged (not replaced)
@@ -132,6 +134,16 @@ export class ChannelThemeConfigDto {
   @Type(() => HealthTipDto)
   healthTips?: HealthTipDto[];
 
+  // The storefront's /policy page ("ডেলিভারি ও রিটার্ন নীতি") — admin-edited
+  // sections, each a title + bulleted lines. Omitted/empty falls back to
+  // the page's original two hardcoded sections (see StorefrontService).
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(20)
+  @ValidateNested({ each: true })
+  @Type(() => PolicySectionDto)
+  policySections?: PolicySectionDto[];
+
   // The side menu's "কাস্টমার কেয়ার" box — a single phone number shown
   // (and WhatsApp-linked/copyable) on the storefront. Omitted/blank hides
   // that box entirely.
@@ -208,4 +220,12 @@ export class ChannelThemeConfigDto {
   @ValidateNested({ each: true })
   @Type(() => CouponDto)
   coupons?: CouponDto[];
+
+  // Settings → VIP কুপন — the discount percent behind every auto-generated
+  // VIP coupon (see VipCoupon / ComboTierDto.vip). The codes themselves are
+  // never set here; this is just the rate they're generated at.
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => VipCouponSettingsDto)
+  vipCoupon?: VipCouponSettingsDto;
 }

@@ -3,6 +3,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { randomBytes } from 'crypto';
 import { Channel, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { OrdersService } from '../orders/orders.service';
@@ -71,6 +72,7 @@ export class StorefrontService {
       enabled?: boolean;
       discountPercent?: number;
       freeDelivery?: boolean;
+      vip?: boolean;
     };
     type RawComboBanner = {
       newBadge?: boolean;
@@ -157,6 +159,10 @@ export class StorefrontService {
               ? { discountPercent: t.discountPercent }
               : {}),
             ...(t.freeDelivery ? { freeDelivery: true } : {}),
+            // Just the flag — reaching this tier earns a real, unique
+            // coupon the backend generates on the spot (see VipCoupon),
+            // never an admin-typed code to leak here.
+            ...(t.vip ? { vip: true } : {}),
           })),
       }));
 
@@ -240,10 +246,7 @@ export class StorefrontService {
         description?: string;
       }[];
     } | null,
-  ): Map<
-    string,
-    { code: string; discountPercent: number; description?: string }
-  > {
+  ): Map<string, { code: string; discountPercent: number; description?: string }> {
     const map = new Map<
       string,
       { code: string; discountPercent: number; description?: string }
@@ -352,6 +355,8 @@ export class StorefrontService {
       categoryId?: string;
       search?: string;
       featured?: boolean;
+      minPrice?: number;
+      maxPrice?: number;
       page?: number;
       limit?: number;
     },
@@ -361,6 +366,44 @@ export class StorefrontService {
       filters.limit && filters.limit > 0 && filters.limit <= 100
         ? filters.limit
         : 20;
+
+    // Search and price-range each need their own OR block, so they're
+    // collected into AND rather than both writing to the same top-level
+    // `OR` key (which would silently drop one of them).
+    const andConditions: Prisma.ProductChannelWhereInput[] = [];
+    if (filters.search) {
+      andConditions.push({
+        OR: [
+          { name: { contains: filters.search, mode: 'insensitive' } },
+          {
+            product: {
+              name: { contains: filters.search, mode: 'insensitive' },
+            },
+          },
+        ],
+      });
+    }
+    if (filters.minPrice !== undefined || filters.maxPrice !== undefined) {
+      // A simple product's real price is its own ProductChannel.price; a
+      // variant product has no single price, so it matches when any of its
+      // variants' basePrice falls in range (the same range the card itself
+      // shows as "৳min–৳max").
+      const priceRange: Prisma.DecimalFilter = {
+        ...(filters.minPrice !== undefined ? { gte: filters.minPrice } : {}),
+        ...(filters.maxPrice !== undefined ? { lte: filters.maxPrice } : {}),
+      };
+      andConditions.push({
+        OR: [
+          { product: { hasVariants: false }, price: priceRange },
+          {
+            product: {
+              hasVariants: true,
+              variants: { some: { basePrice: priceRange } },
+            },
+          },
+        ],
+      });
+    }
 
     const where: Prisma.ProductChannelWhereInput = {
       channelId,
@@ -383,18 +426,7 @@ export class StorefrontService {
             }
           : {}),
       },
-      ...(filters.search
-        ? {
-            OR: [
-              { name: { contains: filters.search, mode: 'insensitive' } },
-              {
-                product: {
-                  name: { contains: filters.search, mode: 'insensitive' },
-                },
-              },
-            ],
-          }
-        : {}),
+      ...(andConditions.length ? { AND: andConditions } : {}),
     };
 
     const [rows, total] = await Promise.all([
@@ -418,6 +450,70 @@ export class StorefrontService {
       total,
       totalPages: Math.ceil(total / limit),
     };
+  }
+
+  // The price-filter slider's own "lowest to highest" bounds — the real
+  // floor/ceiling across whatever this category/search is currently
+  // matching, ignoring any price filter already applied (so the slider's
+  // own range never shrinks around a selection already made on it). A
+  // variant product contributes each of its variants' basePrice, same as
+  // the range its card already shows as "৳min–৳max".
+  async getPriceBounds(
+    channelId: string,
+    filters: { categoryId?: string; search?: string },
+  ): Promise<{ min: number; max: number } | null> {
+    const where: Prisma.ProductChannelWhereInput = {
+      channelId,
+      isPublished: true,
+      product: {
+        isActive: true,
+        deletedAt: null,
+        ...(filters.categoryId
+          ? {
+              OR: [
+                { categoryId: filters.categoryId },
+                { categories: { some: { categoryId: filters.categoryId } } },
+              ],
+            }
+          : {}),
+      },
+      ...(filters.search
+        ? {
+            OR: [
+              { name: { contains: filters.search, mode: 'insensitive' } },
+              {
+                product: {
+                  name: { contains: filters.search, mode: 'insensitive' },
+                },
+              },
+            ],
+          }
+        : {}),
+    };
+
+    const rows = await this.prisma.productChannel.findMany({
+      where,
+      select: {
+        price: true,
+        product: {
+          select: { hasVariants: true, variants: { select: { basePrice: true } } },
+        },
+      },
+    });
+
+    let min: number | null = null;
+    let max: number | null = null;
+    for (const pc of rows) {
+      const prices =
+        pc.product.hasVariants && pc.product.variants.length > 0
+          ? pc.product.variants.map((v) => toNumber(v.basePrice))
+          : [toNumber(pc.price)];
+      for (const p of prices) {
+        if (min === null || p < min) min = p;
+        if (max === null || p > max) max = p;
+      }
+    }
+    return min === null || max === null ? null : { min, max };
   }
 
   async getProductBySlug(channelId: string, slug: string) {
@@ -479,8 +575,10 @@ export class StorefrontService {
           discountPercent?: number;
           freeDelivery?: boolean;
           enabled?: boolean;
+          vip?: boolean;
         }[];
       }[];
+      vipCoupon?: { discountPercent?: number };
     } | null;
     const quantityTiers = (theme?.quantityDiscounts ?? [])
       .filter((t) => (t.quantity ?? 0) >= 2 && (t.discountPercent ?? 0) > 0)
@@ -569,6 +667,7 @@ export class StorefrontService {
         amount: this.parseTierAmount(t.title),
         discountPercent: t.discountPercent,
         freeDelivery: t.freeDelivery,
+        vip: t.vip,
       }));
     const comboGroupIds = [
       ...new Set(
@@ -609,6 +708,14 @@ export class StorefrontService {
         (t) => groupSubtotal >= t.amount && t.freeDelivery,
       );
     });
+    // Any combo group reaching a VIP-flagged tier earns this order a real,
+    // freshly generated coupon (see VipCoupon, below) — just the fact, not
+    // which specific tier: the discount it carries comes from Settings →
+    // VIP কুপন, one rate per channel, not per tier.
+    const vipQualified = comboGroupIds.some((groupId) => {
+      const groupSubtotal = groupSubtotals.get(groupId) ?? 0;
+      return allComboTiers.some((t) => groupSubtotal >= t.amount && t.vip);
+    });
 
     if (theme?.minimumOrderAmount && subtotal < theme.minimumOrderAmount) {
       throw new BadRequestException(
@@ -639,9 +746,24 @@ export class StorefrontService {
     const couponEntry = dto.couponCode
       ? this.getCouponMap(theme).get(dto.couponCode.trim().toUpperCase())
       : undefined;
+    // A typed code can also be a real, backend-generated VIP coupon (see
+    // VipCoupon) — never admin-typed, so it's never in the map above.
+    // Already-used is a hard error (real money), same as an invalid general
+    // code is already a quiet no-op.
+    const vipCouponEntry = dto.couponCode
+      ? await this.prisma.vipCoupon.findFirst({
+          where: { channelId: channel.id, code: dto.couponCode.trim().toUpperCase() },
+        })
+      : null;
+    if (vipCouponEntry?.usedOrderId) {
+      throw new BadRequestException(
+        'এই কুপন কোডটি ইতিমধ্যে ব্যবহার করা হয়েছে।',
+      );
+    }
     const bestDiscountPercent = Math.max(
       qualifyingDiscountPercent,
       couponEntry?.discountPercent ?? 0,
+      vipCouponEntry?.discountPercent ?? 0,
     );
     const discount = bestDiscountPercent
       ? Math.round((standaloneSubtotal * bestDiscountPercent) / 100)
@@ -683,11 +805,54 @@ export class StorefrontService {
       undefined,
     );
 
+    // Records the VIP coupon as spent now that the order it was used on
+    // really exists. usedOrderId's own unique constraint is the actual
+    // enforcement (a concurrent double-submit of the same code has only one
+    // winner here); losing this narrow race and letting both orders through
+    // is an acceptable trade-off for not holding the whole checkout in a
+    // transaction just for this.
+    if (vipCouponEntry) {
+      await this.prisma.vipCoupon
+        .update({
+          where: { id: vipCouponEntry.id },
+          data: { usedOrderId: order.id, usedAt: new Date() },
+        })
+        .catch(() => undefined);
+    }
+
+    // This order's own VIP qualification (see vipQualified above) mints a
+    // fresh, unique coupon right now — never admin-typed, never reused
+    // across orders. Shown once, on this order's own confirmation page.
+    let vipCoupon: { code: string; discountPercent: number } | null = null;
+    if (vipQualified) {
+      const discountPercent = theme?.vipCoupon?.discountPercent ?? 0;
+      // Astronomically unlikely to collide (16^8 codes), but the unique
+      // constraint is the real guarantee — retried a few times rather than
+      // trusted blind.
+      for (let attempt = 0; attempt < 5 && !vipCoupon; attempt++) {
+        const code = `VIP${randomBytes(4).toString('hex').toUpperCase()}`;
+        try {
+          await this.prisma.vipCoupon.create({
+            data: {
+              channelId: channel.id,
+              code,
+              discountPercent,
+              grantedOrderId: order.id,
+            },
+          });
+          vipCoupon = { code, discountPercent };
+        } catch {
+          // Collision (or, once, a non-collision error) — just retry with a
+          // fresh code rather than fail the order the customer already paid for.
+        }
+      }
+    }
+
     // The order is placed, so this phone's Incomplete lead is no longer needed.
     await this.prisma.checkoutLead.deleteMany({
       where: { channelId: channel.id, phone: dto.customerPhone },
     });
-    return order;
+    return { ...order, vipCoupon };
   }
 
   // Keeps a checkout in progress as an Incomplete lead on Web Orders. Stores
@@ -1204,6 +1369,41 @@ export class StorefrontService {
         .map((id) => productById.get(id))
         .filter((r): r is ProductChannelWithProduct => !!r)
         .map((pc) => this.toPublicProduct(pc)),
+    }));
+  }
+
+  // The /policy page's ("ডেলিভারি ও রিটার্ন নীতি") sections — admin-edited
+  // via Settings → Policy, each a title + bulleted lines. A channel that's
+  // never touched this tab falls back to the exact two sections the page
+  // used to have hardcoded, so nothing changes on the live storefront until
+  // an admin actually edits it here.
+  getPolicy(channel: Channel) {
+    type RawSection = { title?: string; points?: string[]; enabled?: boolean };
+    const DEFAULT_SECTIONS: RawSection[] = [
+      {
+        title: 'ডেলিভারি',
+        points: [
+          'সারা বাংলাদেশে হোম ডেলিভারি।',
+          'ক্যাশ অন ডেলিভারি — পণ্য হাতে পেয়ে টাকা দিন।',
+          'পণ্য হাতে পাওয়ার সাথে সাথেই প্যাকেট যাচাই করে নিন।',
+        ],
+      },
+      {
+        title: 'রিটার্ন ও বদল',
+        points: [
+          'ভাঙা বা ভুল পণ্য পেলে দ্রুত আমাদের জানান — আমরা বদলে দেব।',
+          'সিল করা প্যাকেট খোলা বা ব্যবহৃত পণ্যের ক্ষেত্রে বদল প্রযোজ্য নয়।',
+        ],
+      },
+    ];
+    const theme = channel.themeConfig as { policySections?: RawSection[] } | null;
+    const saved = (theme?.policySections ?? []).filter(
+      (s) => (s.enabled ?? true) && s.title?.trim(),
+    );
+    const sections = saved.length > 0 ? saved : DEFAULT_SECTIONS;
+    return sections.map((s) => ({
+      title: s.title!.trim(),
+      points: (s.points ?? []).map((p) => p.trim()).filter(Boolean),
     }));
   }
 }

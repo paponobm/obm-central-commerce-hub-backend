@@ -45,6 +45,12 @@ export class ChannelsController {
     return this.channelsService.findOne(id, user);
   }
 
+  @Get(':id/vip-coupons')
+  @RequirePermissions('channels.view')
+  listVipCoupons(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
+    return this.channelsService.listVipCoupons(id, user);
+  }
+
   @Post()
   @RequirePermissions('channels.manage')
   create(@Body() dto: CreateChannelDto) {

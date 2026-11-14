@@ -50,6 +50,16 @@ export class ComboTierDto {
   @IsOptional()
   @IsBoolean()
   freeDelivery?: boolean;
+
+  // Marks this tier as the VIP tier — reaching it shows the storefront's
+  // "এই অর্ডারে আপনি পাচ্ছেন VIP কাস্টমার কার্ড" banner at checkout and, once
+  // the order is placed, a real, unique coupon code the backend generates on
+  // the spot (StorefrontService.createOrder → VipCoupon) at the discount
+  // rate set in Settings → VIP কুপন. Optional/false keeps the card a plain
+  // discount/free-delivery tier, same as before this field existed.
+  @IsOptional()
+  @IsBoolean()
+  vip?: boolean;
 }
 
 export class ComboBannerDto {

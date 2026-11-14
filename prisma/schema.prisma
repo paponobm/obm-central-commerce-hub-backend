@@ -254,8 +254,35 @@ model Channel {
   userPermissions UserChannelPermission[]
   checkoutLeads   CheckoutLead[]
   integrations    Integration[]
+  vipCoupons      VipCoupon[]
 
   @@map("channels")
+}
+
+// A real, single-use coupon the backend generates automatically the moment
+// an order's own combo group reaches a VIP-flagged pricing tier (Settings →
+// Home Page Combo → Pricing tier cards → VIP) — not an admin-typed code.
+// `code` is globally unique and shown once, on that order's own
+// confirmation page. `usedOrderId`/`usedAt` are set the first (and only)
+// time anyone successfully redeems it on a later order — StorefrontService
+// rejects a second attempt. Settings → VIP কুপন lists every row here so the
+// admin can see what's been granted and used.
+model VipCoupon {
+  id              String    @id @default(cuid())
+  channelId       String
+  code            String    @unique
+  discountPercent Int
+  grantedOrderId  String    @unique
+  usedOrderId     String?   @unique
+  usedAt          DateTime?
+  createdAt       DateTime  @default(now())
+
+  channel      Channel @relation(fields: [channelId], references: [id])
+  grantedOrder Order   @relation("VipCouponGranted", fields: [grantedOrderId], references: [id])
+  usedOrder    Order?  @relation("VipCouponUsed", fields: [usedOrderId], references: [id])
+
+  @@index([channelId])
+  @@map("vip_coupons")
 }
 
 // A storefront checkout that is not complete yet: the customer has entered a
@@ -346,44 +373,44 @@ model Brand {
 // SKU, cost, base price, stock link. Anything a storefront may override
 // lives on ProductChannel instead.
 model Product {
-  id           String    @id @default(cuid())
-  sku          String    @unique
-  name         String
+  id                 String    @id @default(cuid())
+  sku                String    @unique
+  name               String
   // Short, punchy line shown under the name (storefront product card/page).
-  slogan       String?
+  slogan             String?
   // One or two sentences — storefront product card. `description` below is
   // the long-form body on the product detail page; this is deliberately
   // separate so a card doesn't have to truncate the full description.
-  shortDescription String?
+  shortDescription   String?
   // Rich-text body (HTML, from the New/Edit Product page's editor) — the
   // long-form section on the product detail page.
-  description  String?
+  description        String?
   // Optional, globally-unique, admin-chosen URL slug — the default used
   // when publishing to a channel that doesn't already have its own
   // ProductChannel.slug override. Product itself has no public URL; this
   // exists purely as that shared default (see ProductsService.create).
-  slug         String?   @unique
+  slug               String?   @unique
   // Free-form key/value rows (e.g. "Origin" → "কক্সবাজার") shown as a
   // specs table on the product detail page. [{ key, value }, ...].
-  specifications Json?
-  costPrice    Decimal   @db.Decimal(12, 2)
-  basePrice    Decimal   @db.Decimal(12, 2) // fallback price if a channel doesn't override
+  specifications     Json?
+  costPrice          Decimal   @db.Decimal(12, 2)
+  basePrice          Decimal   @db.Decimal(12, 2) // fallback price if a channel doesn't override
   // Optional lower "sale" price shown struck-through against basePrice —
   // only meaningful for a single-variant product (hasVariants: false); a
   // variant product's discount lives per-row on ProductVariant instead.
-  compareAtPrice Decimal? @db.Decimal(12, 2)
-  unit         String    @default("pcs")
+  compareAtPrice     Decimal?  @db.Decimal(12, 2)
+  unit               String    @default("pcs")
   // Free-text country of origin (e.g. "Bangladesh", "China") — the New
   // Product form offers a dropdown of common choices plus a custom entry,
   // but nothing here constrains the value.
-  importCountry String?
-  categoryId   String?
-  brandId      String?
+  importCountry      String?
+  categoryId         String?
+  brandId            String?
   // true = this product's real sellable units are its ProductVariant rows
   // (own sku/price/stock each); false = the master row above (sku,
   // basePrice, compareAtPrice, the Inventory row) IS the one sellable unit.
   // Existing products are unaffected — they're all `false`.
-  hasVariants  Boolean   @default(false)
+  hasVariants        Boolean   @default(false)
   // The attribute name behind this product's variants (e.g. "সাইজ",
   // "ফ্লেভার") — set from the New/Edit Product page's "Step 1 — Options"
   // generator when exactly one attribute was used to build them. Null
@@ -397,11 +424,11 @@ model Product {
   // is the storefront's full photo gallery. Falls back to the gallery's
   // first image wherever it's read, so existing products don't go blank
   // until an admin explicitly sets one.
-  thumbnailUrl String?
-  isActive     Boolean   @default(true)
-  deletedAt    DateTime?
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
+  thumbnailUrl       String?
+  isActive           Boolean   @default(true)
+  deletedAt          DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
 
   category Category? @relation(fields: [categoryId], references: [id])
   brand    Brand?    @relation(fields: [brandId], references: [id])
@@ -609,8 +636,8 @@ model Order {
   // order is waiting in Processing.
   customerResponse CustomerResponseStatus?
 
-  subtotal    Decimal @db.Decimal(12, 2)
-  discount    Decimal @default(0) @db.Decimal(12, 2)
+  subtotal       Decimal @db.Decimal(12, 2)
+  discount       Decimal @default(0) @db.Decimal(12, 2)
   // The slice of `discount` above an admin typed in manually (Web Order
   // Details' Discount field, Approve or Update) — never includes whatever
   // discount the storefront itself already applied at checkout. Purely a
@@ -647,10 +674,14 @@ model Order {
   customer  Customer @relation(fields: [customerId], references: [id])
   createdBy User?    @relation("OrderCreatedBy", fields: [createdById], references: [id])
 
-  items         OrderItem[]
-  statusHistory OrderStatusHistory[]
-  payments      Payment[]
-  shipment      Shipment?
+  items            OrderItem[]
+  statusHistory    OrderStatusHistory[]
+  payments         Payment[]
+  shipment         Shipment?
+  // The one VIP coupon this order's own VIP qualification generated, if any.
+  vipCouponGranted VipCoupon?           @relation("VipCouponGranted")
+  // The one (earlier, different order's) VIP coupon this order redeemed, if any.
+  vipCouponUsed    VipCoupon?           @relation("VipCouponUsed")
 
   @@index([channelId])
   @@index([status])
@@ -662,15 +693,15 @@ model Order {
 // Prices/names are snapshotted at order time. Master Product/ProductChannel
 // data can change later without ever altering a historical order total.
 model OrderItem {
-  id          String  @id @default(cuid())
-  orderId     String
-  productId   String
-  productName String
-  sku         String
-  quantity    Int
-  unitPrice   Decimal @db.Decimal(12, 2)
-  discount    Decimal @default(0) @db.Decimal(12, 2)
-  total       Decimal @db.Decimal(12, 2)
+  id           String  @id @default(cuid())
+  orderId      String
+  productId    String
+  productName  String
+  sku          String
+  quantity     Int
+  unitPrice    Decimal @db.Decimal(12, 2)
+  discount     Decimal @default(0) @db.Decimal(12, 2)
+  total        Decimal @db.Decimal(12, 2)
   // Set when this line is a specific variant, not the base product — sku
   // above is then the variant's own sku, and variantLabel snapshots its
   // unitLabel (e.g. "১৯.৪ গ্রাম") at order time, same snapshot rule as

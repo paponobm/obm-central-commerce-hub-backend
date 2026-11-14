@@ -77,12 +77,19 @@ export class StorefrontController {
     return this.storefrontService.getHealthTips(channel);
   }
 
+  @Get('policy')
+  getPolicy(@CurrentChannel() channel: Channel) {
+    return this.storefrontService.getPolicy(channel);
+  }
+
   @Get('products')
   getProducts(
     @CurrentChannel() channel: Channel,
     @Query('categoryId') categoryId?: string,
     @Query('search') search?: string,
     @Query('featured') featured?: string,
+    @Query('minPrice') minPrice?: string,
+    @Query('maxPrice') maxPrice?: string,
     @Query('page') page?: string,
     @Query('limit') limit?: string,
   ) {
@@ -91,8 +98,24 @@ export class StorefrontController {
       search,
       featured:
         featured === 'true' ? true : featured === 'false' ? false : undefined,
+      minPrice: minPrice ? parseFloat(minPrice) : undefined,
+      maxPrice: maxPrice ? parseFloat(maxPrice) : undefined,
       page: page ? parseInt(page, 10) : undefined,
       limit: limit ? parseInt(limit, 10) : undefined,
+    });
+  }
+
+  // Registered ahead of the `:slug` route below so "price-range" is never
+  // swallowed as a slug lookup.
+  @Get('products/price-range')
+  getProductPriceRange(
+    @CurrentChannel() channel: Channel,
+    @Query('categoryId') categoryId?: string,
+    @Query('search') search?: string,
+  ) {
+    return this.storefrontService.getPriceBounds(channel.id, {
+      categoryId,
+      search,
     });
   }
 

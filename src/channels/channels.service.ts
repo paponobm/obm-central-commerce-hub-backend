@@ -93,6 +93,22 @@ export class ChannelsService {
     return channel;
   }
 
+  // Settings → VIP কুপন's list — every coupon the backend has ever
+  // auto-generated for this channel (see StorefrontService.createOrder),
+  // newest first, with which order earned it and which order (if any) spent
+  // it, so the admin can see what's outstanding vs. already redeemed.
+  async listVipCoupons(id: string, user: JwtPayload) {
+    await this.findOne(id, user);
+    return this.prisma.vipCoupon.findMany({
+      where: { channelId: id },
+      orderBy: { createdAt: 'desc' },
+      include: {
+        grantedOrder: { select: { orderNumber: true, shippingName: true } },
+        usedOrder: { select: { orderNumber: true, shippingName: true } },
+      },
+    });
+  }
+
   private async visibleChannelWhere(
     user: JwtPayload,
   ): Promise<{ id?: { in: string[] } }> {
