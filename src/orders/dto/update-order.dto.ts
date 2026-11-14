@@ -50,6 +50,15 @@ export class UpdateOrderDto {
   @Min(0)
   discount?: number;
 
+  // The slice of `discount` above that an admin typed in manually, as
+  // opposed to whatever the storefront itself already applied at checkout
+  // — tracked separately purely for the "Employee Discount Order" tag.
+  // Omit to leave it unchanged.
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  manualDiscount?: number;
+
   @IsOptional()
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)

@@ -1557,6 +1557,16 @@ export class OrdersService {
             shipmentStatus: 'NOT_SHIPPED',
             subtotal,
             discount: orderDiscount,
+            // A real storefront checkout's own discount is never "employee"
+            // discount. Everything else — a MANUAL/PHONE/etc. order typed
+            // in directly, or a checkout lead an admin is completing by
+            // hand (same WEBSITE source, but checkoutLeadId marks it as
+            // staff-driven, not a real checkout) — has no storefront
+            // discount behind it, so any discount here is manual.
+            manualDiscount:
+              dto.source === 'WEBSITE' && !dto.checkoutLeadId
+                ? 0
+                : orderDiscount,
             shippingFee,
             total,
             shippingName,
@@ -1766,6 +1776,10 @@ export class OrdersService {
 
     const subtotal = lineItems.reduce((sum, li) => sum + li.total, 0);
     const orderDiscount = dto.discount ?? toNumber(order.discount);
+    // Tracked purely for the "Employee Discount Order" tag — never read
+    // back into the total formula itself (orderDiscount already is the
+    // real, combined figure that does that).
+    const manualDiscount = dto.manualDiscount ?? toNumber(order.manualDiscount);
     const shippingFee = dto.shippingFee ?? toNumber(order.shippingFee);
     const total = subtotal - orderDiscount + shippingFee;
     if (total < 0) {
@@ -1830,6 +1844,7 @@ export class OrdersService {
             notes: dto.notes ?? order.notes,
             subtotal,
             discount: orderDiscount,
+            manualDiscount,
             shippingFee,
             total,
             paymentStatus,
