@@ -872,7 +872,7 @@ export class ReportsService {
         by: ['createdById', 'status'],
         where,
         _count: true,
-        _sum: { total: true },
+        _sum: { total: true, manualDiscount: true },
       }),
       this.prisma.order.groupBy({
         by: ['createdById', 'source'],
@@ -902,6 +902,11 @@ export class ReportsService {
         id: string;
         name: string;
         total: Metric;
+        // The admin-added slice of discount (Order.manualDiscount — never
+        // the website's own portion, see its own schema comment) summed
+        // across every order this employee created in range, however many
+        // appear in CONFIRMED/PROCESSING too (same "total" rule as amount).
+        totalDiscount: number;
         byStatus: Record<OrderStatus, Metric>;
         bySource: Record<OrderSource, Metric>;
       }
@@ -913,6 +918,7 @@ export class ReportsService {
           id,
           name: nameById.get(id) ?? 'Unknown',
           total: { count: 0, amount: 0 },
+          totalDiscount: 0,
           byStatus: Object.fromEntries(
             this.EMPLOYEE_REPORT_STATUSES.map((s) => [s, { count: 0, amount: 0 }]),
           ) as Record<OrderStatus, Metric>,
@@ -933,6 +939,7 @@ export class ReportsService {
       // double it, since every order appears in both passes.
       entry.total.count += g._count;
       entry.total.amount += amount;
+      entry.totalDiscount += toNumber(g._sum.manualDiscount);
       // CONFIRMED/PROCESSING rows (not in EMPLOYEE_REPORT_STATUSES) still
       // count toward the employee's own total above; they just don't get
       // their own column, same as the Orders list's own tabs.

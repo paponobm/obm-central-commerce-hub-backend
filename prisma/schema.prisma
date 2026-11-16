@@ -717,6 +717,11 @@ model OrderItem {
   // later without blocking that on old orders still referencing it.
   variantId    String?
   variantLabel String?
+  // True when this line was added on a later edit (updateOrder), after the
+  // order already existed — e.g. an agent adding a product to tempt a
+  // non-responsive customer — rather than part of the original order. Once
+  // true it stays true across further edits; see updateOrder's diffing.
+  isSuggested  Boolean @default(false)
 
   order   Order           @relation(fields: [orderId], references: [id], onDelete: Cascade)
   product Product         @relation(fields: [productId], references: [id])

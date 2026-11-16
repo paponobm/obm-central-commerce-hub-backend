@@ -279,26 +279,48 @@ export class OrdersService {
     const customerIds = orders.map((o) => o.customerId);
     const orderIds = orders.map((o) => o.id);
     // The lookups are independent, so they run together.
-    const [customerStats, orderSequence, auditFlags, adminNotes, lastActivity] =
-      await Promise.all([
-        this.getCustomerStats(customerIds),
-        this.getOrderSequenceNumbers(customerIds),
-        this.getAuditFlags(orderIds, [
-          'order.invoice_printed',
-          'order.web_approved',
-        ]),
-        this.getAdminNotes(orderIds),
-        this.getLastOrderActivity(orderIds),
-      ]);
+    const [
+      customerStats,
+      orderSequence,
+      auditFlags,
+      adminNotes,
+      lastActivity,
+      statusEnteredAt,
+      responseEnteredAt,
+    ] = await Promise.all([
+      this.getCustomerStats(customerIds),
+      this.getOrderSequenceNumbers(customerIds),
+      this.getAuditFlags(orderIds, [
+        'order.invoice_printed',
+        'order.web_approved',
+      ]),
+      this.getAdminNotes(orderIds),
+      this.getLastOrderActivity(orderIds),
+      this.getStatusEnteredAt(orderIds),
+      this.getCustomerResponseEnteredAt(orderIds),
+    ]);
     return orders.map((o) => {
       const stats = customerStats.get(o.customerId);
       const flags = auditFlags.get(o.id);
+      const enteredStatusAt = this.resolveStatusEnteredAt(
+        statusEnteredAt.get(o.id) ?? o.createdAt,
+        o.webApprovedAt,
+      );
       return {
         ...o,
         invoicePrinted: flags?.has('order.invoice_printed') ?? false,
         webApproved: flags?.has('order.web_approved') ?? false,
         adminNotes: adminNotes.get(o.id) ?? [],
         lastUpdate: lastActivity.get(o.id) ?? { at: o.updatedAt, by: null },
+        // When the order most recently entered its CURRENT status — e.g. the
+        // Pending tab's Date column should show when it became Pending (a
+        // reactivated order included), not its original creation time.
+        statusEnteredAt: enteredStatusAt,
+        // Same idea for the Web Orders page's response-based tabs (Good But
+        // No Response, No Response, On Hold, Advance Payment): when it never
+        // had a response set, falls back to statusEnteredAt (not createdAt)
+        // — it's just been sitting wherever it landed on becoming Pending.
+        responseEnteredAt: responseEnteredAt.get(o.id) ?? enteredStatusAt,
         customer: {
           ...o.customer,
           successRate: stats?.successRate ?? null,
@@ -350,18 +372,31 @@ export class OrdersService {
     if (!order) {
       throw new NotFoundException(`No order found for "${orderNumber}"`);
     }
-    const [stats, orderSequence, flags, adminNotes, lastActivity] =
-      await Promise.all([
-        this.getCustomerStats([order.customerId]),
-        this.getOrderSequenceNumbers([order.customerId]),
-        this.getAuditFlags(
-          [order.id],
-          ['order.invoice_printed', 'order.web_approved'],
-        ),
-        this.getAdminNotes([order.id]),
-        this.getLastOrderActivity([order.id]),
-      ]);
+    const [
+      stats,
+      orderSequence,
+      flags,
+      adminNotes,
+      lastActivity,
+      statusEnteredAt,
+      responseEnteredAt,
+    ] = await Promise.all([
+      this.getCustomerStats([order.customerId]),
+      this.getOrderSequenceNumbers([order.customerId]),
+      this.getAuditFlags(
+        [order.id],
+        ['order.invoice_printed', 'order.web_approved'],
+      ),
+      this.getAdminNotes([order.id]),
+      this.getLastOrderActivity([order.id]),
+      this.getStatusEnteredAt([order.id]),
+      this.getCustomerResponseEnteredAt([order.id]),
+    ]);
     const orderFlags = flags.get(order.id);
+    const enteredStatusAt = this.resolveStatusEnteredAt(
+      statusEnteredAt.get(order.id) ?? order.createdAt,
+      order.webApprovedAt,
+    );
     return {
       ...order,
       invoicePrinted: orderFlags?.has('order.invoice_printed') ?? false,
@@ -371,6 +406,8 @@ export class OrdersService {
         at: order.updatedAt,
         by: null,
       },
+      statusEnteredAt: enteredStatusAt,
+      responseEnteredAt: responseEnteredAt.get(order.id) ?? enteredStatusAt,
       customer: {
         ...order.customer,
         successRate: stats.get(order.customerId)?.successRate ?? null,
@@ -664,7 +701,7 @@ export class OrdersService {
     });
     const productById = new Map(products.map((p) => [p.id, p]));
     const leadIds = leads.map((l) => l.id);
-    const [responseLogs, noteLogs] = await Promise.all([
+    const [responseLogs, responseOnlyLogs, noteLogs] = await Promise.all([
       this.prisma.auditLog.findMany({
         where: {
           entityType: 'CheckoutLead',
@@ -680,6 +717,20 @@ export class OrdersService {
           createdAt: true,
           user: { select: { name: true } },
         },
+      }),
+      // Strictly the response-category change itself (not mixed with plain
+      // detail/item edits like the lastUpdate map above) — same "when did
+      // this most recently enter its current response" idea as the Web
+      // Orders list's response-based tabs already use for real orders.
+      this.prisma.auditLog.findMany({
+        where: {
+          entityType: 'CheckoutLead',
+          entityId: { in: leadIds },
+          action: 'checkout_lead.response_change',
+        },
+        orderBy: { createdAt: 'desc' },
+        distinct: ['entityId'],
+        select: { entityId: true, createdAt: true },
       }),
       this.prisma.auditLog.findMany({
         where: {
@@ -722,6 +773,9 @@ export class OrdersService {
         { at: l.createdAt, by: l.user?.name ?? null },
       ]),
     );
+    const responseEnteredAt = new Map(
+      responseOnlyLogs.map((l) => [l.entityId, l.createdAt]),
+    );
     return leads.map((lead) => {
       const toLeadItems = (stored: StoredLeadItem[]) =>
         stored.map((i) => {
@@ -752,6 +806,7 @@ export class OrdersService {
         lastUpdate,
         adminNotes: notesByLead.get(lead.id) ?? [],
         cancelled: lead.cancelledAt !== null,
+        responseEnteredAt: responseEnteredAt.get(lead.id) ?? lead.createdAt,
       };
     });
   }
@@ -761,7 +816,7 @@ export class OrdersService {
   async listOrderActivity(id: string, user: JwtPayload) {
     const order = await this.prisma.order.findUnique({
       where: { id },
-      select: { channelId: true },
+      select: { channelId: true, source: true },
     });
     if (!order) {
       throw new NotFoundException(`Order ${id} not found`);
@@ -806,17 +861,50 @@ export class OrdersService {
       }),
     ]);
 
+    // The "move to next status"/scan-to-RTS shortcuts walk an order through
+    // several intermediate statuses with back-to-back API calls (e.g.
+    // Pending -> Confirmed -> Processing -> Ready to ship). Each hop is a
+    // real, separately-stored history row, but showing all of them in the
+    // feed just reads as noise — collapse a same-actor burst of status
+    // changes into the single, final one.
+    const STATUS_BURST_WINDOW_MS = 15_000;
+    const collapsedStatusChanges: typeof statusChanges = [];
+    for (const h of statusChanges) {
+      const prev = collapsedStatusChanges[collapsedStatusChanges.length - 1];
+      if (
+        prev &&
+        prev.changedBy?.name === h.changedBy?.name &&
+        prev.createdAt.getTime() - h.createdAt.getTime() <= STATUS_BURST_WINDOW_MS
+      ) {
+        continue;
+      }
+      collapsedStatusChanges.push(h);
+    }
+
     const entries = [
-      ...statusChanges.map((h) => ({
-        key: `status-${h.id}`,
-        at: h.createdAt,
-        by: h.changedBy?.name ?? null,
-        text: `Order status changed to ${h.toStatus.replaceAll('_', ' ')}`,
-        // Lets the frontend give a cancellation its own highlighted card,
-        // with the reason/note recorded on the status change itself.
-        toStatus: h.toStatus,
-        note: h.note,
-      })),
+      ...collapsedStatusChanges.map((h) => {
+        // A website order is created already PENDING, before it's even been
+        // approved from Web Orders — the same "Processing" stage shown
+        // elsewhere for an unapproved web order (e.g. its Source column),
+        // not the literal PENDING column it'll only truly reach once
+        // approved. Only this very first, order-creation row gets relabelled
+        // — any later, real PENDING transition (e.g. a reactivation) still
+        // reads as PENDING.
+        const isWebsiteCreationRow =
+          order.source === 'WEBSITE' &&
+          h.note === 'Order created' &&
+          h.toStatus === 'PENDING';
+        return {
+          key: `status-${h.id}`,
+          at: h.createdAt,
+          by: h.changedBy?.name ?? null,
+          text: `Order status changed to ${isWebsiteCreationRow ? 'PROCESSING' : h.toStatus.replaceAll('_', ' ')}`,
+          // Lets the frontend give a cancellation its own highlighted card,
+          // with the reason/note recorded on the status change itself.
+          toStatus: h.toStatus,
+          note: h.note,
+        };
+      }),
       ...logs.map((l) => ({
         key: `log-${l.id}`,
         at: l.createdAt,
@@ -1054,14 +1142,34 @@ export class OrdersService {
     for (const order of orders) {
       await this.assertChannelAccess(user, order.channelId);
     }
-    await this.prisma.auditLog.createMany({
-      data: orders.map((o) => ({
-        userId: actorUserId,
-        action: 'order.invoice_printed',
+
+    // The print dialog's "Print Invoice" and "Download PDF" options both
+    // run the same print action (the browser dialog's "Save as PDF" covers
+    // the PDF case), so picking both for the same selection shouldn't log
+    // two "Invoice printed" entries. Skip orders logged as printed moments ago.
+    const PRINT_DEDUPE_WINDOW_MS = 10_000;
+    const recent = await this.prisma.auditLog.findMany({
+      where: {
         entityType: 'Order',
-        entityId: o.id,
-      })),
+        entityId: { in: orders.map((o) => o.id) },
+        action: 'order.invoice_printed',
+        createdAt: { gte: new Date(Date.now() - PRINT_DEDUPE_WINDOW_MS) },
+      },
+      select: { entityId: true },
     });
+    const recentlyPrinted = new Set(recent.map((l) => l.entityId));
+    const toLog = orders.filter((o) => !recentlyPrinted.has(o.id));
+
+    if (toLog.length > 0) {
+      await this.prisma.auditLog.createMany({
+        data: toLog.map((o) => ({
+          userId: actorUserId,
+          action: 'order.invoice_printed',
+          entityType: 'Order',
+          entityId: o.id,
+        })),
+      });
+    }
     return { marked: orders.length };
   }
 
@@ -1191,6 +1299,65 @@ export class OrdersService {
     for (const c of statusChanges)
       consider(c.orderId, c.createdAt, c.changedBy?.name ?? null);
     return last;
+  }
+
+  // When each order most recently entered its current status — every status
+  // change (updateStatus) writes exactly one OrderStatusHistory row, so the
+  // newest row per order is always that order's current status taking
+  // effect. The caller falls back to the order's own createdAt when absent
+  // (a brand-new order's very first status is never itself written as a row).
+  private async getStatusEnteredAt(orderIds: string[]) {
+    const entered = new Map<string, Date>();
+    if (orderIds.length === 0) return entered;
+
+    const latest = await this.prisma.orderStatusHistory.findMany({
+      where: { orderId: { in: orderIds } },
+      orderBy: { createdAt: 'desc' },
+      distinct: ['orderId'],
+      select: { orderId: true, createdAt: true },
+    });
+    for (const h of latest) entered.set(h.orderId, h.createdAt);
+    return entered;
+  }
+
+  // A website order's "Order created" history row is written the instant
+  // the customer checks out — before it is approved from Web Orders, while
+  // it's still hidden from the main Orders list entirely. So the moment it
+  // actually becomes a visible, workable Pending order is the later of the
+  // two: that history row, or (if later) when it was approved.
+  private resolveStatusEnteredAt(
+    historyBased: Date,
+    webApprovedAt: Date | null,
+  ): Date {
+    return webApprovedAt && webApprovedAt > historyBased
+      ? webApprovedAt
+      : historyBased;
+  }
+
+  // When each order most recently entered its current customerResponse —
+  // same trick as getStatusEnteredAt, over the audit log instead of a
+  // dedicated history table: updateCustomerResponse writes exactly one
+  // 'order.customer_response_change' row per change, so the newest row per
+  // order always matches its current value. Falls back to the caller's own
+  // statusEnteredAt (not createdAt) when absent, since an order that has
+  // never had a response set is simply still sitting wherever it landed on
+  // becoming Pending — not at its original, possibly much earlier, creation.
+  private async getCustomerResponseEnteredAt(orderIds: string[]) {
+    const entered = new Map<string, Date>();
+    if (orderIds.length === 0) return entered;
+
+    const latest = await this.prisma.auditLog.findMany({
+      where: {
+        entityType: 'Order',
+        entityId: { in: orderIds },
+        action: 'order.customer_response_change',
+      },
+      orderBy: { createdAt: 'desc' },
+      distinct: ['entityId'],
+      select: { entityId: true, createdAt: true },
+    });
+    for (const l of latest) entered.set(l.entityId, l.createdAt);
+    return entered;
   }
 
   // Notes added from Order actions, grouped by order, oldest first.
@@ -1746,6 +1913,15 @@ export class OrdersService {
       }
     }
 
+    // A productId already on the order keeps whatever isSuggested it had —
+    // including staying true once it's been flagged, across later edits.
+    // A productId never seen on this order before is a brand-new addition
+    // (e.g. an agent tempting a non-responsive customer with another
+    // product), so it starts out flagged suggested.
+    const existingSuggestedByProduct = new Map(
+      order.items.map((i) => [i.productId, i.isSuggested]),
+    );
+
     const lineItems = dto.items.map((item) => {
       const product = productMap.get(item.productId)!;
       const variant = item.variantId ? variantMap.get(item.variantId) : null;
@@ -1771,6 +1947,7 @@ export class OrdersService {
         unitPrice,
         discount,
         total,
+        isSuggested: existingSuggestedByProduct.get(item.productId) ?? true,
       };
     });
 
@@ -1829,6 +2006,7 @@ export class OrdersService {
             unitPrice: li.unitPrice,
             discount: li.discount,
             total: li.total,
+            isSuggested: li.isSuggested,
           })),
         });
 
