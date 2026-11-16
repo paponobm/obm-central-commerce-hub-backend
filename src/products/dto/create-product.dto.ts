@@ -48,6 +48,17 @@ export class CreateProductDto {
   @Type(() => SpecificationDto)
   specifications?: SpecificationDto[];
 
+  // "কার জন্য" tags (e.g. "পরিবারের জন্য") — multi-select, unlike Origin.
+  // Not a fixed enum: any string is accepted, since the admin UI's own
+  // checkbox list is just the distinct set already used across every
+  // product (see ProductsService.listForWhoTags).
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(20)
+  @IsString({ each: true })
+  @MinLength(1, { each: true })
+  forWho?: string[];
+
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)
   costPrice: number;

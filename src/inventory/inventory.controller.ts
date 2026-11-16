@@ -28,10 +28,12 @@ export class InventoryController {
   findAll(
     @Query('lowStock') lowStock?: string,
     @Query('search') search?: string,
+    @Query('expandVariants') expandVariants?: string,
   ) {
     return this.inventoryService.findAll({
       lowStockOnly: lowStock === 'true',
       search,
+      expandVariants: expandVariants === 'true',
     });
   }
 

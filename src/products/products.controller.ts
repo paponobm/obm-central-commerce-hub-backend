@@ -49,6 +49,14 @@ export class ProductsController {
     });
   }
 
+  // Registered ahead of the `:id` route below so "for-who-tags" is never
+  // swallowed as an id lookup.
+  @Get('for-who-tags')
+  @RequirePermissions('products.view')
+  listForWhoTags() {
+    return this.productsService.listForWhoTags();
+  }
+
   @Get(':id')
   @RequirePermissions('products.view')
   findOne(@Param('id') id: string, @CurrentUser() user: JwtPayload) {

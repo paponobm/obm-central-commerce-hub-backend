@@ -952,6 +952,9 @@ export class StorefrontService {
       specifications:
         (pc.product.specifications as
           { key: string; value: string }[] | null) ?? null,
+      // "কার জন্য" tags (e.g. "পরিবারের জন্য") — powers the combo builder's
+      // own "কম্বোটা কার জন্য?" filter. Empty for a product never tagged.
+      forWho: pc.product.forWho,
       hasVariants: pc.product.hasVariants,
       // Flash Deal's "৳min–৳max" range and "২টি সাইজ"-style button label —
       // only meaningful (and only sent) for a variant product; a simple

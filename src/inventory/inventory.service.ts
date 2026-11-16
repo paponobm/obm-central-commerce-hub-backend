@@ -21,7 +21,15 @@ interface InventoryRow {
 export class InventoryService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async findAll(filters: { lowStockOnly?: boolean; search?: string }) {
+  async findAll(filters: {
+    lowStockOnly?: boolean;
+    search?: string;
+    // Opt-in only (the Inventory page's own list) — everything else calling
+    // this (the summary cards, Low Stock page, channel Inventory page)
+    // keeps getting exactly one row per product, same as before this
+    // existed.
+    expandVariants?: boolean;
+  }) {
     const rows = await this.prisma.inventory.findMany({
       where: {
         ...(filters.search
@@ -44,25 +52,61 @@ export class InventoryService {
             thumbnailUrl: true,
             isActive: true,
             images: { take: 1, orderBy: { sortOrder: 'asc' } },
+            hasVariants: true,
+            variants: {
+              where: { deletedAt: null, isActive: true },
+              orderBy: { sortOrder: 'asc' },
+            },
           },
         },
       },
       orderBy: { product: { name: 'asc' } },
     });
 
-    const withAvailable = rows.map((row) => ({
-      productId: row.productId,
-      sku: row.product.sku,
-      name: row.product.name,
-      imageUrl: row.product.thumbnailUrl ?? row.product.images[0]?.url ?? null,
-      isActive: row.product.isActive,
-      currentStock: row.currentStock,
-      reservedStock: row.reservedStock,
-      availableStock: row.currentStock - row.reservedStock,
-      lowStockThreshold: row.lowStockThreshold,
-      isLowStock: row.currentStock <= row.lowStockThreshold,
-      updatedAt: row.updatedAt,
-    }));
+    const withAvailable = rows.flatMap((row) => {
+      const baseImageUrl =
+        row.product.thumbnailUrl ?? row.product.images[0]?.url ?? null;
+
+      // A variant product's real stock lives per-variant (see
+      // ProductsService.applyVariantStockDelta, which keeps this row's own
+      // currentStock as their sum) — expanding here surfaces that real
+      // breakdown instead of just the one combined number. reservedStock
+      // has no per-variant equivalent in the schema, so each variant row
+      // only ever shows its own stock as "available."
+      if (filters.expandVariants && row.product.hasVariants && row.product.variants.length > 0) {
+        return row.product.variants.map((v) => ({
+          productId: row.productId,
+          variantId: v.id,
+          sku: v.sku,
+          name: v.unitLabel ? `${row.product.name} (${v.unitLabel})` : row.product.name,
+          imageUrl: v.imageUrl ?? baseImageUrl,
+          isActive: row.product.isActive,
+          currentStock: v.stock,
+          reservedStock: 0,
+          availableStock: v.stock,
+          lowStockThreshold: row.lowStockThreshold,
+          isLowStock: v.stock <= row.lowStockThreshold,
+          updatedAt: v.updatedAt,
+        }));
+      }
+
+      return [
+        {
+          productId: row.productId,
+          variantId: null as string | null,
+          sku: row.product.sku,
+          name: row.product.name,
+          imageUrl: baseImageUrl,
+          isActive: row.product.isActive,
+          currentStock: row.currentStock,
+          reservedStock: row.reservedStock,
+          availableStock: row.currentStock - row.reservedStock,
+          lowStockThreshold: row.lowStockThreshold,
+          isLowStock: row.currentStock <= row.lowStockThreshold,
+          updatedAt: row.updatedAt,
+        },
+      ];
+    });
 
     return filters.lowStockOnly
       ? withAvailable.filter((r) => r.isLowStock)

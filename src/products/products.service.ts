@@ -282,6 +282,22 @@ export class ProductsService {
     });
   }
 
+  // The New/Edit Product form's "For Who" checkbox list — not a fixed enum,
+  // just the distinct, non-empty tags already used across every product.
+  // Typing a brand new one on a product and saving makes it a real option
+  // here for every product after that.
+  async listForWhoTags(): Promise<string[]> {
+    const rows = await this.prisma.product.findMany({
+      where: { deletedAt: null, forWho: { isEmpty: false } },
+      select: { forWho: true },
+    });
+    const tags = new Set<string>();
+    for (const row of rows) {
+      for (const tag of row.forWho) tags.add(tag);
+    }
+    return [...tags].sort((a, b) => a.localeCompare(b));
+  }
+
   async findOne(id: string, user: JwtPayload) {
     const product = await this.prisma.product.findFirst({
       where: { id, deletedAt: null },

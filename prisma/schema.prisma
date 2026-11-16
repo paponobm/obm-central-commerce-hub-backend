@@ -393,6 +393,14 @@ model Product {
   // Free-form key/value rows (e.g. "Origin" → "কক্সবাজার") shown as a
   // specs table on the product detail page. [{ key, value }, ...].
   specifications     Json?
+  // "কার জন্য" (Who is this for) tags — e.g. "পরিবারের জন্য", "শিশুর জন্য".
+  // Multi-select, unlike Origin: a product can carry more than one. The
+  // admin's checkbox list is the distinct set of values already used across
+  // every product (see ProductsService.listForWhoTags), not a fixed enum —
+  // typing a brand new one here makes it a real option for every product
+  // after this. Powers the storefront combo builder's own "কম্বোটা কার
+  // জন্য?" filter.
+  forWho             String[]  @default([])
   costPrice          Decimal   @db.Decimal(12, 2)
   basePrice          Decimal   @db.Decimal(12, 2) // fallback price if a channel doesn't override
   // Optional lower "sale" price shown struck-through against basePrice —
