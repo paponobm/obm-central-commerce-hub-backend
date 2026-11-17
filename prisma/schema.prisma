@@ -58,6 +58,17 @@ enum CustomerResponseStatus {
   CONFIRMED
 }
 
+// Manually set, admin-triaged follow-up on a SHIPPED order that's gone
+// overdue (sitting in SHIPPED over 72h without a courier delivery update) —
+// unrelated to CustomerResponseStatus, which tracks pre-shipment follow-up.
+// Null means "New" (not yet triaged) — there is no NEW enum value.
+enum OverdueResponse {
+  CUSTOMER_CONFIRM
+  NO_RESPONSE
+  CUSTOMER_REFUSED
+  COURIER_CLAIM
+}
+
 enum PaymentMethod {
   COD
   BKASH
@@ -643,6 +654,9 @@ model Order {
   // Empty until someone sets it from Web Orders; an empty response means the
   // order is waiting in Processing.
   customerResponse CustomerResponseStatus?
+  // Manual triage of an overdue SHIPPED order (see OverdueResponse) — null
+  // means "New"/not yet triaged. Only meaningful while status is SHIPPED.
+  overdueResponse  OverdueResponse?
 
   subtotal       Decimal @db.Decimal(12, 2)
   discount       Decimal @default(0) @db.Decimal(12, 2)

@@ -25,6 +25,7 @@ import { CreateOrderDto } from './dto/create-order.dto';
 import { UpdateOrderDto } from './dto/update-order.dto';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
 import { UpdateCustomerResponseDto } from './dto/update-customer-response.dto';
+import { UpdateOverdueResponseDto } from './dto/update-overdue-response.dto';
 import { RecordPaymentDto } from './dto/record-payment.dto';
 import { UpdatePaymentDto } from './dto/update-payment.dto';
 import { MarkPrintedDto } from './dto/mark-printed.dto';
@@ -274,6 +275,18 @@ export class OrdersController {
     @CurrentUser() user: JwtPayload,
   ) {
     return this.ordersService.updateCustomerResponse(id, dto, user.sub, user);
+  }
+
+  // Manual triage of an overdue SHIPPED order ("Shipped Action" on the
+  // order Edit page) — only reachable while status is still SHIPPED.
+  @Patch(':id/overdue-response')
+  @RequirePermissions('orders.update_status')
+  updateOverdueResponse(
+    @Param('id') id: string,
+    @Body() dto: UpdateOverdueResponseDto,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.ordersService.updateOverdueResponse(id, dto, user.sub, user);
   }
 
   // Books a real shipment via a configured courier integration — separate

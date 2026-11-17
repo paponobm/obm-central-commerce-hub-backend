@@ -34,6 +34,7 @@ import { CreateOrderShipmentDto } from './dto/create-order-shipment.dto';
 import { UpdateOrderDto } from './dto/update-order.dto';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
 import { UpdateCustomerResponseDto } from './dto/update-customer-response.dto';
+import { UpdateOverdueResponseDto } from './dto/update-overdue-response.dto';
 import { RecordPaymentDto } from './dto/record-payment.dto';
 import { UpdatePaymentDto } from './dto/update-payment.dto';
 import { UpdateCheckoutLeadDto } from './dto/update-checkout-lead.dto';
@@ -98,12 +99,20 @@ interface StockRow {
 
 // Human-readable Activity log lines for the audit rows written by this service.
 function describeOrderLog(action: string, after: unknown): string {
-  const data = (after ?? {}) as { note?: string; customerResponse?: string };
+  const data = (after ?? {}) as {
+    note?: string;
+    customerResponse?: string;
+    overdueResponse?: string;
+  };
   switch (action) {
     case 'order.note':
       return `Note added: ${data.note ?? ''}`;
     case 'order.customer_response_change':
       return `Customer response changed to ${(data.customerResponse ?? 'none').replaceAll('_', ' ')}`;
+    case 'order.overdue_response_change':
+      return `Shipped action set to ${(data.overdueResponse ?? 'none').replaceAll('_', ' ')}${
+        data.note ? `: ${data.note}` : ''
+      }`;
     case 'order.web_approved':
       return 'Approved from Web Orders';
     case 'order.invoice_printed':
@@ -832,6 +841,7 @@ export class OrdersService {
             in: [
               'order.note',
               'order.customer_response_change',
+              'order.overdue_response_change',
               'order.web_approved',
               'order.invoice_printed',
               'order.created_from_lead',
@@ -1459,19 +1469,27 @@ export class OrdersService {
     // order simply by guessing/enumerating its id.
     await this.assertChannelAccess(user, order.channelId);
 
-    const [timeline, auditFlags] = await Promise.all([
+    const [timeline, auditFlags, statusEnteredAt, responseEnteredAt] = await Promise.all([
       this.buildTimeline(order.id, order.statusHistory),
       this.getAuditFlags(
         [order.id],
         ['order.web_approved', 'order.created_from_lead'],
       ),
+      this.getStatusEnteredAt([order.id]),
+      this.getCustomerResponseEnteredAt([order.id]),
     ]);
     const flags = auditFlags.get(order.id);
+    const enteredStatusAt = this.resolveStatusEnteredAt(
+      statusEnteredAt.get(order.id) ?? order.createdAt,
+      order.webApprovedAt,
+    );
     return {
       ...order,
       timeline,
       webApproved: flags?.has('order.web_approved') ?? false,
       createdFromLead: flags?.has('order.created_from_lead') ?? false,
+      statusEnteredAt: enteredStatusAt,
+      responseEnteredAt: responseEnteredAt.get(order.id) ?? enteredStatusAt,
     };
   }
 
@@ -2417,6 +2435,46 @@ export class OrdersService {
             customerResponse: dto.customerResponse,
             note: dto.note ?? null,
           },
+        },
+      }),
+    ]);
+    return updated;
+  }
+
+  // Manual triage of an overdue SHIPPED order (see OverdueResponse's schema
+  // comment) — only meaningful while the order is still SHIPPED, since once
+  // it's actually delivered/returned/etc. (whether by hand or Steadfast's
+  // webhook auto-sync) it stops being "overdue" by definition.
+  async updateOverdueResponse(
+    id: string,
+    dto: UpdateOverdueResponseDto,
+    actorUserId: string | undefined,
+    user: JwtPayload,
+  ) {
+    const order = await this.prisma.order.findUnique({ where: { id } });
+    if (!order) {
+      throw new NotFoundException(`Order ${id} not found`);
+    }
+    await this.assertChannelAccess(user, order.channelId);
+    if (order.status !== 'SHIPPED') {
+      throw new BadRequestException(
+        `Order ${order.orderNumber} is not Shipped (status: ${order.status})`,
+      );
+    }
+
+    const [updated] = await this.prisma.$transaction([
+      this.prisma.order.update({
+        where: { id },
+        data: { overdueResponse: dto.overdueResponse },
+      }),
+      this.prisma.auditLog.create({
+        data: {
+          userId: actorUserId,
+          action: 'order.overdue_response_change',
+          entityType: 'Order',
+          entityId: id,
+          before: { overdueResponse: order.overdueResponse },
+          after: { overdueResponse: dto.overdueResponse, note: dto.note ?? null },
         },
       }),
     ]);
