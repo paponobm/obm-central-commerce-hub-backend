@@ -14,11 +14,14 @@ import {
   ScanMode,
   ShipmentStatus,
 } from '@prisma/client';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import { PrismaService } from '../prisma/prisma.service';
 import { runTransaction } from '../common/prisma-transaction.util';
 import { toNumber } from '../common/decimal.util';
 import {
   businessDateStr,
+  businessEndOfDay,
+  businessToday,
   resolveDateRange,
 } from '../common/business-date.util';
 import {
@@ -66,7 +69,11 @@ const TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
     'PENDING_CANCEL',
     'CANCELLED',
   ],
-  SHIPPED: ['DELIVERED', 'PARTIAL', 'PENDING_RETURN', 'LOST'],
+  // PENDING here is a genuine walk-back — a mis-shipped order, pulled back
+  // for re-packing — not a return (the parcel never reached the customer,
+  // so it restocks via the same rts_reversal-style path as leaving RTS
+  // early, not the post-delivery RETURNED flow). See updateStatus below.
+  SHIPPED: ['DELIVERED', 'PARTIAL', 'PENDING_RETURN', 'LOST', 'PENDING'],
   PARTIAL: ['DELIVERED', 'PENDING_RETURN', 'RETURNED'],
   DELIVERED: ['PENDING_RETURN', 'RETURNED'],
   PENDING_RETURN: ['RETURNED'],
@@ -2038,6 +2045,10 @@ export class OrdersService {
             deliveryMethod: dto.deliveryMethod ?? order.deliveryMethod,
             source: dto.source ?? order.source,
             notes: dto.notes ?? order.notes,
+            preorderReason: dto.preorderReason ?? order.preorderReason,
+            preorderNotifyAt: dto.preorderNotifyAt
+              ? new Date(dto.preorderNotifyAt)
+              : order.preorderNotifyAt,
             subtotal,
             discount: orderDiscount,
             manualDiscount,
@@ -2350,6 +2361,17 @@ export class OrdersService {
             actorUserId,
             'rts_reversal',
           );
+        } else if (order.status === 'SHIPPED' && dto.status === 'PENDING') {
+          // Pulled back from SHIPPED, not a post-delivery return — same
+          // stock restoration as leaving RTS early, just a later point in
+          // the pipeline to be reversing out of.
+          await this.restockOnReturn(
+            tx,
+            order,
+            'restock',
+            actorUserId,
+            'shipped_reversal',
+          );
         } else if (dto.status === 'RETURNED') {
           await this.restockOnReturn(
             tx,
@@ -2368,7 +2390,9 @@ export class OrdersService {
                 ? 'RETURNED'
                 : dto.status === 'LOST'
                   ? 'FAILED'
-                  : undefined;
+                  : order.status === 'SHIPPED' && dto.status === 'PENDING'
+                    ? 'NOT_SHIPPED'
+                    : undefined;
 
         const updated = await tx.order.update({
           where: { id },
@@ -2400,6 +2424,45 @@ export class OrdersService {
       },
       { timeout: 10000, maxWait: 5000 },
     );
+  }
+
+  // Automatically advances a PREORDER order to PENDING once its
+  // notification date has arrived — the same target as the manual
+  // "Convert to Pending" action, just clock-triggered instead of a click.
+  // Fires exactly at the *start* of that calendar day, Asia/Dhaka midnight
+  // — not the specific clock time originally picked for preorderNotifyAt,
+  // which is informational only, not a precise countdown target. Runs
+  // once a day, at midnight, rather than polling — the trigger genuinely
+  // is "has this day started", not "has N minutes passed". No stock side
+  // effect either way — PREORDER already reserves stock exactly like
+  // PENDING (see TRANSITIONS' own comment). changedById stays null, same
+  // convention as the Steadfast webhook's own auto-sync history rows —
+  // shows as "—" in the activity log, not a user.
+  @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT, { timeZone: 'Asia/Dhaka' })
+  async processDuePreorders() {
+    const cutoff = businessEndOfDay(businessToday());
+    const due = await this.prisma.order.findMany({
+      where: { status: 'PREORDER', preorderNotifyAt: { lte: cutoff } },
+      select: { id: true },
+    });
+    for (const order of due) {
+      const { count } = await this.prisma.order.updateMany({
+        where: { id: order.id, status: 'PREORDER' },
+        data: { status: 'PENDING' },
+      });
+      // Someone already moved it by hand in the meantime — skip the
+      // history row rather than recording a change that didn't happen.
+      if (count === 0) continue;
+      await this.prisma.orderStatusHistory.create({
+        data: {
+          orderId: order.id,
+          fromStatus: 'PREORDER',
+          toStatus: 'PENDING',
+          note: 'Preorder notification date reached — moved to Pending automatically',
+          changedById: null,
+        },
+      });
+    }
   }
 
   // Independent of Order.status — a plain field update with no state
@@ -2685,7 +2748,10 @@ export class OrdersService {
     // out of READY_TO_SHIP (back to Pending/Processing, or cancelled) never
     // physically left the building, so it isn't a "return" in the normal,
     // post-shipment sense even though the stock movement is identical.
-    reason: 'returned' | 'rts_reversal' = 'returned',
+    // shipped_reversal is the SHIPPED -> PENDING bulk action: the order did
+    // physically ship, but is being walked all the way back for re-packing,
+    // so the stock deducted on entering RTS needs to go back too.
+    reason: 'returned' | 'rts_reversal' | 'shipped_reversal' = 'returned',
   ) {
     // write_off intentionally writes no StockMovement — nothing changed in
     // Inventory, so there's nothing to log in a ledger whose whole purpose
@@ -2719,7 +2785,9 @@ export class OrdersService {
         note:
           reason === 'rts_reversal'
             ? `Moved out of Ready to Ship — order ${order.orderNumber}`
-            : `Returned & restocked — order ${order.orderNumber}`,
+            : reason === 'shipped_reversal'
+              ? `Moved back from Shipped to Pending — order ${order.orderNumber}`
+              : `Returned & restocked — order ${order.orderNumber}`,
         createdById: actorUserId,
       });
     }

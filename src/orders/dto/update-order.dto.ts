@@ -75,4 +75,15 @@ export class UpdateOrderDto {
   @IsOptional()
   @IsEnum(OrderSource)
   source?: OrderSource;
+
+  // Only meaningful while the order is still PREORDER — editable here since
+  // they're plain informational fields, not the status itself (that still
+  // has its own state-machine endpoint, unaffected by this DTO).
+  @IsOptional()
+  @IsString()
+  preorderReason?: string;
+
+  @IsOptional()
+  @IsString()
+  preorderNotifyAt?: string;
 }
