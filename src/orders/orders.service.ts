@@ -76,7 +76,7 @@ const TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
   SHIPPED: ['DELIVERED', 'PARTIAL', 'PENDING_RETURN', 'LOST', 'PENDING'],
   PARTIAL: ['DELIVERED', 'PENDING_RETURN', 'RETURNED'],
   DELIVERED: ['PENDING_RETURN', 'RETURNED'],
-  PENDING_RETURN: ['RETURNED'],
+  PENDING_RETURN: ['RETURNED', 'LOST'],
   RETURNED: [],
   PENDING_CANCEL: ['PENDING', 'CANCELLED'],
   // Reactivating a cancelled order back to PENDING has no stock effect —
