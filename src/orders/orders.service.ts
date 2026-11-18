@@ -29,6 +29,7 @@ import {
   ChannelScopeService,
 } from '../common/channel-scope/channel-scope.service';
 import { JwtPayload } from '../auth/types/jwt-payload.type';
+import { ROLE_AGENT } from '../users/role-hierarchy';
 import { CustomersService } from '../customers/customers.service';
 import { IntegrationsService } from '../integrations/integrations.service';
 import { ProviderRegistry } from '../integrations/providers/provider-registry';
@@ -194,6 +195,35 @@ export class OrdersService {
     const orders = await this.prisma.order.findMany({
       where: {
         ...channelFilter,
+        // An Agent only ever sees orders they personally created OR
+        // personally handled (webHandledById — a website order's
+        // createdById is always null, so once approved it's only "theirs"
+        // via this field) on the Order List. includeWebUnapproved=true
+        // means a Dashboard widget or the Web Orders page itself is
+        // asking for website orders too (approved or not) — those stay
+        // unrestricted for everyone, Agent included, same philosophy as
+        // the Hourly Web Orders chart. A caller requesting that flag
+        // without also filtering source=WEBSITE (e.g. the Dashboard's
+        // Orders-by-Source breakdown, which wants every source) still
+        // gets its non-website rows agent-scoped — only the website ones
+        // inside that same result stay open.
+        // AND (not a bare OR key) — this `where` object has its own
+        // later OR for `search`; two top-level OR keys in one object
+        // literal would collide and silently drop the first.
+        ...(user.roleName === ROLE_AGENT
+          ? filters.includeWebUnapproved
+            ? { AND: [{ OR: [{ createdById: user.sub }, { source: 'WEBSITE' }] }] }
+            : {
+                AND: [
+                  {
+                    OR: [
+                      { createdById: user.sub },
+                      { webHandledById: user.sub },
+                    ],
+                  },
+                ],
+              }
+          : {}),
         // A website order stays in Web Orders until it is approved.
         ...(filters.includeWebUnapproved
           ? {}
@@ -266,6 +296,7 @@ export class OrdersService {
         customer: { select: { id: true, name: true, phone: true } },
         channel: { select: { id: true, name: true, slug: true } },
         createdBy: { select: { id: true, name: true } },
+        webHandledBy: { select: { id: true, name: true } },
         shipment: {
           select: {
             id: true,
@@ -355,12 +386,23 @@ export class OrdersService {
   async findByOrderNumber(orderNumber: string, user: JwtPayload) {
     const channelFilter = await this.channelScope.resolveDirectFilter(user);
     const order = await this.prisma.order.findFirst({
-      where: { ...channelFilter, orderNumber: orderNumber.trim() },
+      where: {
+        ...channelFilter,
+        orderNumber: orderNumber.trim(),
+        // Same Agent-only-sees-their-own-orders rule as findAll/findOne —
+        // a scanned order number is still direct access, not a list.
+        // Website orders stay open to every agent, same exception as
+        // everywhere else (nobody "creates" one).
+        ...(user.roleName === ROLE_AGENT
+          ? { OR: [{ createdById: user.sub }, { source: 'WEBSITE' }] }
+          : {}),
+      },
       relationLoadStrategy: 'join',
       include: {
         customer: { select: { id: true, name: true, phone: true } },
         channel: { select: { id: true, name: true, slug: true } },
         createdBy: { select: { id: true, name: true } },
+        webHandledBy: { select: { id: true, name: true } },
         shipment: {
           select: {
             id: true,
@@ -569,7 +611,12 @@ export class OrdersService {
   ) {
     const order = await this.prisma.order.findUnique({
       where: { id },
-      select: { id: true, status: true, channelId: true },
+      select: {
+        id: true,
+        status: true,
+        channelId: true,
+        webHandledById: true,
+      },
     });
     if (!order) {
       throw new NotFoundException(`Order ${id} not found`);
@@ -584,13 +631,18 @@ export class OrdersService {
     if (already.has(id)) {
       throw new BadRequestException('This order is already approved');
     }
+    // Credits whoever approves it, same "last action wins" rule as
+    // updateCustomerResponse — no exception for Advance Payment: the
+    // approver takes over credit even when someone else set that
+    // response earlier.
+    const webHandledById = actorUserId ?? order.webHandledById;
     // Approval is when the order gets its real OBM number, so it appears in
     // the Pending list with the regular sequence.
     const orderNumber = await this.prisma.$transaction(async (tx) => {
       const next = await this.generateOrderNumber(tx);
       await tx.order.update({
         where: { id },
-        data: { orderNumber: next, webApprovedAt: new Date() },
+        data: { orderNumber: next, webApprovedAt: new Date(), webHandledById },
       });
       await tx.auditLog.create({
         data: {
@@ -1446,6 +1498,7 @@ export class OrdersService {
       include: {
         customer: true,
         channel: true,
+        webHandledBy: { select: { id: true, name: true } },
         items: {
           include: {
             product: {
@@ -1475,6 +1528,7 @@ export class OrdersService {
     // endpoint — otherwise a restricted user could reach another store's
     // order simply by guessing/enumerating its id.
     await this.assertChannelAccess(user, order.channelId);
+    this.assertAgentOwnsOrder(user, order.createdById, order.source);
 
     const [timeline, auditFlags, statusEnteredAt, responseEnteredAt] = await Promise.all([
       this.buildTimeline(order.id, order.statusHistory),
@@ -1576,6 +1630,23 @@ export class OrdersService {
     const allowed = await this.channelScope.getAssignedChannelIds(user.sub);
     if (!allowed.includes(channelId)) {
       throw new ForbiddenException('You are not assigned to this store');
+    }
+  }
+
+  // Same spirit as assertChannelAccess, one dimension narrower — an Agent
+  // reaching an order directly (by id or scanned order number) must still
+  // be its own creator, not just assigned to the right store. A website
+  // order is the one exception, same as findAll's own list-level rule —
+  // nobody "creates" it, and Web Orders stays open to every agent, not
+  // just whoever happens to approve it.
+  private assertAgentOwnsOrder(
+    user: JwtPayload,
+    createdById: string | null,
+    source: OrderSource,
+  ) {
+    if (user.roleName !== ROLE_AGENT || source === 'WEBSITE') return;
+    if (createdById !== user.sub) {
+      throw new ForbiddenException('You can only view orders you created');
     }
   }
 
@@ -2485,7 +2556,15 @@ export class OrdersService {
     const [updated] = await this.prisma.$transaction([
       this.prisma.order.update({
         where: { id },
-        data: { customerResponse: dto.customerResponse },
+        // Always credits whoever makes this change — the one exception
+        // (approving out of Advance Payment keeps the original setter) is
+        // approveWebOrder's own rule, not this one; every customerResponse
+        // change, including moving OUT of Advance Payment into something
+        // else, is this actor's own action.
+        data: {
+          customerResponse: dto.customerResponse,
+          webHandledById: actorUserId ?? order.webHandledById,
+        },
       }),
       this.prisma.auditLog.create({
         data: {

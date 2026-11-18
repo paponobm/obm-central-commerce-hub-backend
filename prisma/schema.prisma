@@ -158,6 +158,7 @@ model User {
   role Role @relation(fields: [roleId], references: [id])
 
   createdOrders       Order[]                 @relation("OrderCreatedBy")
+  webHandledOrders    Order[]                 @relation("OrderWebHandledBy")
   orderStatusChanges  OrderStatusHistory[]
   stockMovements      StockMovement[]
   auditLogs           AuditLog[]
@@ -346,7 +347,11 @@ model UserChannel {
 model Category {
   id          String    @id @default(cuid())
   name        String
-  slug        String    @unique
+  // Not @unique at the DB level — a soft-deleted category's slug must be
+  // freely reusable (a deleted category still has a real row, deletedAt
+  // just marks it gone). Uniqueness among active (deletedAt: null)
+  // categories is enforced in CategoriesService instead.
+  slug        String
   imageUrl    String?
   // Short storefront subtitle shown under the category name (e.g. in a
   // side-menu category list) — purely descriptive, no effect on catalog logic.
@@ -365,6 +370,7 @@ model Category {
   productCategories ProductCategory[]
 
   @@index([parentId])
+  @@index([slug])
   @@map("categories")
 }
 
@@ -685,16 +691,22 @@ model Order {
   preorderReason   String?
   preorderNotifyAt DateTime?
 
-  createdById   String? // staff user for MANUAL/PHONE/etc orders; null for WEBSITE
+  createdById    String? // staff user for MANUAL/PHONE/etc orders; null for WEBSITE
   // Set when a website order is approved from Web Orders; until then it is
   // kept out of the Order List.
-  webApprovedAt DateTime?
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
+  webApprovedAt  DateTime?
+  // Which staff user gets credit for working this web order — null until
+  // someone touches it. Last-action-wins: updates to whoever most
+  // recently changed customerResponse (OrdersService.updateCustomerResponse)
+  // or approved it (OrdersService.approveWebOrder), no exceptions.
+  webHandledById String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
 
-  channel   Channel? @relation(fields: [channelId], references: [id])
-  customer  Customer @relation(fields: [customerId], references: [id])
-  createdBy User?    @relation("OrderCreatedBy", fields: [createdById], references: [id])
+  channel      Channel? @relation(fields: [channelId], references: [id])
+  customer     Customer @relation(fields: [customerId], references: [id])
+  createdBy    User?    @relation("OrderCreatedBy", fields: [createdById], references: [id])
+  webHandledBy User?    @relation("OrderWebHandledBy", fields: [webHandledById], references: [id])
 
   items            OrderItem[]
   statusHistory    OrderStatusHistory[]

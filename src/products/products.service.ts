@@ -271,12 +271,16 @@ export class ProductsService {
         // per product, so there's no reason to ship the full gallery here.
         images: { take: 1, orderBy: { sortOrder: 'asc' } },
         // Published-stores badges on the list page need the channel names,
-        // not just the join — small, bounded per product (one row per
+        // not just the join — small, bounded per product (one row more per
         // channel that exists), so this is cheap even at full catalog size.
         channels: {
           where: { isPublished: true },
           select: { channelId: true, channel: { select: { name: true } } },
         },
+        // The list page needs this for the variant count (shown next to
+        // the name) and price range (min-max across variants) on a
+        // variable product.
+        variants: { where: { deletedAt: null } },
       },
       orderBy: { createdAt: 'desc' },
     });

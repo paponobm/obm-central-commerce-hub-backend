@@ -31,9 +31,8 @@ export class CategoriesService {
     if (dto.parentId) {
       await this.findOne(dto.parentId);
     }
-    return this.handleUniqueConstraints(() =>
-      this.prisma.category.create({ data: dto }),
-    );
+    await this.assertSlugAvailable(dto.slug);
+    return this.prisma.category.create({ data: dto });
   }
 
   async findAll() {
@@ -63,10 +62,14 @@ export class CategoriesService {
       await this.findOne(dto.parentId);
       await this.assertNoCycle(id, dto.parentId);
     }
+    if (dto.slug !== undefined && dto.slug !== existing.slug) {
+      await this.assertSlugAvailable(dto.slug, id);
+    }
 
-    const updated = await this.handleUniqueConstraints(() =>
-      this.prisma.category.update({ where: { id }, data: dto }),
-    );
+    const updated = await this.prisma.category.update({
+      where: { id },
+      data: dto,
+    });
     // A replaced (or cleared) image leaves its old file orphaned on disk
     // otherwise — only once the swap has actually succeeded, and only the
     // old file, never the new one.
@@ -226,17 +229,18 @@ export class CategoriesService {
     }
   }
 
-  private async handleUniqueConstraints<T>(fn: () => Promise<T>): Promise<T> {
-    try {
-      return await fn();
-    } catch (err) {
-      if (
-        err instanceof Prisma.PrismaClientKnownRequestError &&
-        err.code === 'P2002'
-      ) {
-        throw new ConflictException('Category with this slug already exists');
-      }
-      throw err;
+  // slug has no DB-level unique constraint (see the schema comment) —
+  // only an ACTIVE category can block another one from taking its slug;
+  // a soft-deleted one's slug is free to reuse. excludeId skips the row
+  // being updated itself, so leaving its own slug untouched never
+  // conflicts with itself.
+  private async assertSlugAvailable(slug: string, excludeId?: string) {
+    const conflict = await this.prisma.category.findFirst({
+      where: { slug, deletedAt: null, ...(excludeId ? { id: { not: excludeId } } : {}) },
+      select: { id: true },
+    });
+    if (conflict) {
+      throw new ConflictException('Category with this slug already exists');
     }
   }
 }

@@ -151,13 +151,23 @@ async function main() {
   });
 
   console.log('Upserting categories...');
+  // slug has no DB-level unique constraint any more (a soft-deleted
+  // category's slug is reusable — see schema.prisma's own comment), so
+  // this can't be a plain prisma.category.upsert({ where: { slug } }) —
+  // look up the active row by slug by hand instead.
   const categoryIdByKey: Record<string, string> = {};
   for (const c of CATS) {
-    const row = await prisma.category.upsert({
-      where: { slug: c.slug },
-      update: { name: c.name },
-      create: { name: c.name, slug: c.slug, isPublished: true },
+    const existing = await prisma.category.findFirst({
+      where: { slug: c.slug, deletedAt: null },
     });
+    const row = existing
+      ? await prisma.category.update({
+          where: { id: existing.id },
+          data: { name: c.name },
+        })
+      : await prisma.category.create({
+          data: { name: c.name, slug: c.slug, isPublished: true },
+        });
     categoryIdByKey[c.id] = row.id;
   }
 

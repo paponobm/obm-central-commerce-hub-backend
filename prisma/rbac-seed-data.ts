@@ -48,16 +48,17 @@ export const PERMISSIONS: { key: string; label: string }[] = [
 ];
 
 // Only Super Admin has a fixed, role-wide permission set ('*' — every
-// permission, every store, not editable). Admin, Manager and Member each
-// get their own individually-toggled permissions on the UserPermission
-// table instead (see UsersService) — their role-level set here is
-// deliberately empty so reseeding never resurrects a shared fixed list for
-// them or clobbers what's actually been granted per user.
+// permission, every store, not editable). Admin, Manager, Member and
+// Agent each get their own individually-toggled permissions on the
+// UserPermission table instead (see UsersService) — their role-level set
+// here is deliberately empty so reseeding never resurrects a shared fixed
+// list for them or clobbers what's actually been granted per user.
 export const ROLE_PERMISSIONS: Record<string, string[] | '*'> = {
   'Super Admin': '*',
   Admin: [],
   Manager: [],
   Member: [],
+  Agent: [],
 };
 
 // Idempotent — safe to call against an already-seeded database (plain

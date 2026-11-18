@@ -14,9 +14,9 @@ import {
   ADMIN_ONLY_PERMISSION,
   NOT_FOR_MEMBER_PERMISSION,
   ROLE_ADMIN,
-  ROLE_MEMBER,
   ROLE_SUPER_ADMIN,
   assignableRoleNames,
+  isSingleStoreRole,
 } from './role-hierarchy';
 
 const userWithRoleAndPermissions = Prisma.validator<Prisma.UserDefaultArgs>()({
@@ -153,11 +153,12 @@ export class UsersService {
     const derivedChannelIds = Array.from(
       new Set(channelPermissionRows.map((r) => r.channelId)),
     );
-    // A Member may be created bare (no store yet — configured right after
-    // via the access panel) but never with more than one; 0 or 1 is fine.
-    if (targetRole.name === ROLE_MEMBER && derivedChannelIds.length > 1) {
+    // A Member/Agent may be created bare (no store yet — configured right
+    // after via the access panel) but never with more than one; 0 or 1 is
+    // fine.
+    if (isSingleStoreRole(targetRole.name) && derivedChannelIds.length > 1) {
       throw new BadRequestException(
-        'A Member can only be assigned to one store',
+        `A ${targetRole.name} can only be assigned to one store`,
       );
     }
 
@@ -295,12 +296,12 @@ export class UsersService {
         : undefined;
 
     if (
-      targetRoleName === ROLE_MEMBER &&
+      isSingleStoreRole(targetRoleName) &&
       derivedChannelIds !== undefined &&
       derivedChannelIds.length > 1
     ) {
       throw new BadRequestException(
-        'A Member can only be assigned to one store',
+        `A ${targetRoleName} can only be assigned to one store`,
       );
     }
 
@@ -448,9 +449,9 @@ export class UsersService {
     // Granting ANY real "All Stores" permission makes this user
     // unrestricted — able to reach "All Stores" in their own topbar — same
     // as checking the old "All Stores" box used to, just derived now
-    // instead of picked separately. Member never gets this, regardless.
+    // instead of picked separately. Member/Agent never get this, regardless.
     const hasRealGrant = Array.from(keys).some((k) => k !== 'channels.view');
-    if (hasRealGrant && roleName !== ROLE_MEMBER) {
+    if (hasRealGrant && !isSingleStoreRole(roleName)) {
       keys.add(NOT_FOR_MEMBER_PERMISSION);
     }
     return Array.from(keys);

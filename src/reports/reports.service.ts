@@ -5,6 +5,7 @@ import { InventoryService } from '../inventory/inventory.service';
 import { toNumber } from '../common/decimal.util';
 import { ChannelScopeService } from '../common/channel-scope/channel-scope.service';
 import { JwtPayload } from '../auth/types/jwt-payload.type';
+import { ROLE_AGENT } from '../users/role-hierarchy';
 import {
   BUSINESS_TIMEZONE,
   businessToday,
@@ -163,6 +164,27 @@ export class ReportsService {
       this.orderWhereFilter(user, channelId),
       this.orderChannelSqlFragment(user, channelId),
     ]);
+    // An Agent's Dashboard summarizes only the orders they personally
+    // created OR personally handled (webHandledById — a website order's
+    // createdById is always null, so an approved one is only "theirs" via
+    // this field) — every order-derived stat below, not the store-wide
+    // totals other roles see. Kept local to getDashboard (not inside the
+    // two shared helpers above) so Reports pages stay unaffected; and not
+    // applied to lowStock, which isn't order-derived. The "Hourly Web
+    // Orders" chart (getHourlyWebOrders) is also left unscoped — those
+    // are real customer checkouts, essentially never created by staff, so
+    // scoping it the same way would just always read zero.
+    const scopedOrderWhere: Prisma.OrderWhereInput =
+      user.roleName === ROLE_AGENT
+        ? {
+            ...orderWhere,
+            OR: [{ createdById: user.sub }, { webHandledById: user.sub }],
+          }
+        : orderWhere;
+    const agentSql: Prisma.Sql =
+      user.roleName === ROLE_AGENT
+        ? Prisma.sql`AND ("createdById" = ${user.sub} OR "webHandledById" = ${user.sub})`
+        : Prisma.empty;
 
     const [
       todayRows,
@@ -181,28 +203,29 @@ export class ReportsService {
           AND ("createdAt" AT TIME ZONE ${BUSINESS_TIMEZONE})::date
               = (now() AT TIME ZONE ${BUSINESS_TIMEZONE})::date
           ${channelSql}
+          ${agentSql}
       `,
       this.prisma.order.groupBy({
         by: ['status'],
-        where: orderWhere,
+        where: scopedOrderWhere,
         _count: true,
       }),
       this.prisma.order.groupBy({
         by: ['channelId'],
-        where: orderWhere,
+        where: scopedOrderWhere,
         _count: true,
         _sum: { total: true },
       }),
       this.prisma.channel.findMany({ select: { id: true, name: true } }),
       this.prisma.order.groupBy({
         by: ['source'],
-        where: orderWhere,
+        where: scopedOrderWhere,
         _count: true,
         _sum: { total: true },
       }),
       this.inventoryService.findAll({ lowStockOnly: true }),
       this.prisma.order.findMany({
-        where: orderWhere,
+        where: scopedOrderWhere,
         take: 10,
         orderBy: { createdAt: 'desc' },
         include: {
@@ -219,6 +242,7 @@ export class ReportsService {
           AND ("createdAt" AT TIME ZONE ${BUSINESS_TIMEZONE})
               >= (now() AT TIME ZONE ${BUSINESS_TIMEZONE})::date - interval '6 days'
           ${channelSql}
+          ${agentSql}
         GROUP BY day
         ORDER BY day ASC
       `,
@@ -409,11 +433,21 @@ export class ReportsService {
   ) {
     const range = resolveDateRange(from, to);
     const orderWhere = await this.orderWhereFilter(user, channelId);
+    // Same Agent-only-sees-their-own-orders rule as getDashboard (created
+    // OR handled) — Top Products is still an order-derived Dashboard
+    // widget, just a second endpoint the page happens to call separately.
+    const scopedOrderWhere: Prisma.OrderWhereInput =
+      user.roleName === ROLE_AGENT
+        ? {
+            ...orderWhere,
+            OR: [{ createdById: user.sub }, { webHandledById: user.sub }],
+          }
+        : orderWhere;
     const rows = await this.prisma.orderItem.groupBy({
       by: ['productId'],
       where: {
         order: {
-          ...orderWhere,
+          ...scopedOrderWhere,
           status: { not: 'CANCELLED' },
           createdAt: { gte: range.gte, lte: range.lte },
         },
@@ -449,7 +483,7 @@ export class ReportsService {
         where: {
           productId: { in: rows.map((r) => r.productId) },
           order: {
-            ...orderWhere,
+            ...scopedOrderWhere,
             status: { in: ['RETURNED', 'PENDING_RETURN'] },
             createdAt: { gte: range.gte, lte: range.lte },
           },
@@ -549,6 +583,17 @@ export class ReportsService {
         { source: { not: 'WEBSITE' } },
         { source: 'WEBSITE', webApprovedAt: { not: null } },
       ],
+      // Same Agent-only-sees-their-own-orders rule as getDashboard (created
+      // OR handled) — the "Total Orders" card is order-derived too, just
+      // its own endpoint. AND (not a bare OR key) — this object already
+      // has its own top-level OR above; a second one would collide.
+      ...(user.roleName === ROLE_AGENT
+        ? {
+            AND: [
+              { OR: [{ createdById: user.sub }, { webHandledById: user.sub }] },
+            ],
+          }
+        : {}),
     };
 
     const [currentCount, previousCount] = await Promise.all([
