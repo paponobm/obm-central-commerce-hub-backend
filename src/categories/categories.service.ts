@@ -7,6 +7,8 @@ import {
 import { Prisma } from '@prisma/client';
 import { unlink } from 'fs/promises';
 import { join } from 'path';
+import { ConfigService } from '@nestjs/config';
+import { v2 as cloudinary } from 'cloudinary';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateCategoryDto } from './dto/create-category.dto';
 import { UpdateCategoryDto } from './dto/update-category.dto';
@@ -14,7 +16,16 @@ import { SetCategoryChannelsDto } from './dto/set-category-channels.dto';
 
 @Injectable()
 export class CategoriesService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly config: ConfigService,
+  ) {
+    cloudinary.config({
+      cloud_name: this.config.get<string>('CLOUDINARY_CLOUD_NAME'),
+      api_key: this.config.get<string>('CLOUDINARY_API_KEY'),
+      api_secret: this.config.get<string>('CLOUDINARY_API_SECRET'),
+    });
+  }
 
   async create(dto: CreateCategoryDto) {
     if (dto.parentId) {
@@ -75,12 +86,36 @@ export class CategoriesService {
         'Cannot delete a category that still has subcategories',
       );
     }
+    if (await this.isPublishedAnywhere(category)) {
+      throw new BadRequestException(
+        'Unpublish this category from every storefront before deleting it',
+      );
+    }
     const deleted = await this.prisma.category.update({
       where: { id },
       data: { deletedAt: new Date() },
     });
     this.deleteUploadedFile(category.imageUrl);
     return deleted;
+  }
+
+  // Mirrors the Categories page's own isCategoryOnChannel exactly (and
+  // StorefrontService.getCategories' filter) — true the moment any active
+  // channel would actually show this category on its real storefront.
+  private async isPublishedAnywhere(category: {
+    isPublished: boolean;
+    slug: string;
+  }): Promise<boolean> {
+    if (!category.isPublished) return false;
+    const channels = await this.prisma.channel.findMany({
+      where: { deletedAt: null, isActive: true },
+      select: { themeConfig: true },
+    });
+    return channels.some((channel) => {
+      const slugs = (channel.themeConfig as { categorySlugs?: string[] } | null)
+        ?.categorySlugs;
+      return !slugs || slugs.includes(category.slug);
+    });
   }
 
   // Which active channels this category is currently published to —
@@ -145,16 +180,31 @@ export class CategoriesService {
     return { success: true };
   }
 
-  // Only ever deletes files this server itself controls (its own
-  // /uploads/ directory) — never follows an arbitrary external URL.
-  // Missing/already-gone files are silently ignored; this is best-effort
-  // disk cleanup, not something that should ever fail the request.
+  // Deletes the file from wherever it actually lives — this server's own
+  // /uploads/ directory, or Cloudinary — detected from the URL's own shape
+  // rather than the current STORAGE_DRIVER, since older categories can
+  // still point at whichever backend was active when they were uploaded.
+  // Anything else (an arbitrary external URL) is left untouched. Best-
+  // effort either way — missing/already-gone files are silently ignored,
+  // never something that should fail the request.
   private deleteUploadedFile(imageUrl: string | null) {
     if (!imageUrl) return;
-    const match = imageUrl.match(/\/uploads\/([^/?#]+)$/);
-    if (!match) return;
-    const filePath = join(process.cwd(), 'uploads', match[1]);
-    unlink(filePath).catch(() => undefined);
+
+    const localMatch = imageUrl.match(/\/uploads\/([^/?#]+)$/);
+    if (localMatch) {
+      const filePath = join(process.cwd(), 'uploads', localMatch[1]);
+      unlink(filePath).catch(() => undefined);
+      return;
+    }
+
+    // e.g. https://res.cloudinary.com/<cloud>/image/upload/v169.../obm-
+    // sourcing/abc123.png -> public_id "obm-sourcing/abc123".
+    const cloudinaryMatch = imageUrl.match(
+      /res\.cloudinary\.com\/.+\/upload\/(?:v\d+\/)?(.+)\.[a-zA-Z0-9]+(?:[?#].*)?$/,
+    );
+    if (cloudinaryMatch) {
+      cloudinary.uploader.destroy(cloudinaryMatch[1]).catch(() => undefined);
+    }
   }
 
   // Walk up from the proposed new parent; if we ever reach `id`, setting

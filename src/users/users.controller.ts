@@ -35,6 +35,7 @@ export class UsersController {
       id: user.id,
       name: user.name,
       email: user.email,
+      avatarUrl: user.avatarUrl,
       role: user.roleName,
       permissions: user.permissions,
     };

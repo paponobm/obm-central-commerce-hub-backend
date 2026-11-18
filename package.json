@@ -22,7 +22,8 @@
     "prisma:generate": "prisma generate",
     "prisma:deploy": "prisma migrate deploy",
     "prisma:studio": "prisma studio",
-    "seed": "ts-node prisma/seed.ts"
+    "seed": "ts-node prisma/seed.ts",
+    "create-super-admin": "ts-node prisma/create-super-admin.ts"
   },
   "prisma": {
     "seed": "ts-node prisma/seed.ts"

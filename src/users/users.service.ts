@@ -46,6 +46,7 @@ export type UserWithPermissions = {
   name: string;
   email: string;
   passwordHash: string;
+  avatarUrl: string | null;
   isActive: boolean;
   deletedAt: Date | null;
   roleId: string;
@@ -96,6 +97,7 @@ export class UsersService {
       name: user.name,
       email: user.email,
       passwordHash: user.passwordHash,
+      avatarUrl: user.avatarUrl,
       isActive: user.isActive,
       deletedAt: user.deletedAt,
       roleId: user.roleId,

@@ -294,9 +294,13 @@ export class StorefrontService {
   // channel-scoped) — every storefront sees the same category tree, filtered
   // to published ones via the admin's publish toggle. On top of that, a
   // channel can optionally curate its own subset via
-  // themeConfig.categorySlugs (set from that channel's Settings page) —
-  // omitted/empty means no restriction, so channels that have never touched
-  // this (e.g. Online Burmese Market) keep seeing every published category.
+  // themeConfig.categorySlugs (set from the Categories page's own Publish
+  // checkboxes, or added to from that channel's Settings page) — omitted
+  // (null/undefined) means no restriction, so a channel that's never been
+  // curated keeps seeing every published category. An explicit empty array
+  // is a real, deliberate restriction (every category unchecked), not the
+  // same as "never configured" — mirrors CategoriesService.setCategoryChannels,
+  // which only ever treats null as unrestricted.
   async getCategories(channel: Channel) {
     const theme = channel.themeConfig as { categorySlugs?: string[] } | null;
     const slugs = theme?.categorySlugs;
@@ -304,7 +308,7 @@ export class StorefrontService {
       where: {
         deletedAt: null,
         isPublished: true,
-        ...(slugs && slugs.length > 0 ? { slug: { in: slugs } } : {}),
+        ...(slugs ? { slug: { in: slugs } } : {}),
       },
       select: {
         id: true,
