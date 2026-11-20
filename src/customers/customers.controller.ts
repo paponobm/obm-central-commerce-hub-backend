@@ -33,6 +33,16 @@ export class CustomersController {
     return this.customersService.findAll(user, search, channelId);
   }
 
+  // "Our Record" on New Order/Web Orders/Edit Order — same broad audience
+  // as the BD Courier check it sits next to, not customers.view, so an
+  // Agent who can only create orders still sees it. Declared before ':id'
+  // only for readability; no actual route collision.
+  @Get('phone-summary')
+  @RequirePermissions('orders.view')
+  getPhoneSummary(@Query('phone') phone: string) {
+    return this.customersService.getPhoneSummary(phone ?? '');
+  }
+
   // POST, not GET — declared before ':id' only for readability; no actual
   // route collision since the methods differ.
   @Post('detect-districts')

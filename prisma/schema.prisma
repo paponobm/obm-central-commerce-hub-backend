@@ -302,21 +302,28 @@ model VipCoupon {
 // to place the order. Shown as Incomplete on Web Orders. One row per
 // channel + phone; it is deleted when an order is placed with that phone.
 model CheckoutLead {
-  id               String                  @id @default(cuid())
-  channelId        String
-  phone            String
-  name             String?
-  address          String?
-  items            Json // [{ productId, quantity, unitPrice }] as the customer entered them
+  id                    String                  @id @default(cuid())
+  channelId             String
+  phone                 String
+  name                  String?
+  address               String?
+  items                 Json // [{ productId, quantity, unitPrice }] as the customer entered them
   // Items as the admin is preparing them in Ordered products; empty until edited.
-  adminItems       Json?
+  adminItems            Json?
   // Empty until set from Order actions; an empty response keeps the lead in Incomplete.
   // Carried to the order when it is created.
-  customerResponse CustomerResponseStatus?
+  customerResponse      CustomerResponseStatus?
   // Set when cancelled from Order actions; puts the lead in the Cancel tab.
-  cancelledAt      DateTime?
-  createdAt        DateTime                @default(now())
-  updatedAt        DateTime                @updatedAt
+  cancelledAt           DateTime?
+  // Same BD Courier snapshot fields as Order — see its own comment. A
+  // lead that later becomes a real order does NOT carry this over; the
+  // order fetches (and persists) its own, once, the first time it's
+  // viewed there.
+  bdCourierCheckedPhone String?
+  bdCourierCheckedAt    DateTime?
+  bdCourierResult       Json?
+  createdAt             DateTime                @default(now())
+  updatedAt             DateTime                @updatedAt
 
   channel Channel @relation(fields: [channelId], references: [id])
 
@@ -691,17 +698,26 @@ model Order {
   preorderReason   String?
   preorderNotifyAt DateTime?
 
-  createdById    String? // staff user for MANUAL/PHONE/etc orders; null for WEBSITE
+  createdById           String? // staff user for MANUAL/PHONE/etc orders; null for WEBSITE
   // Set when a website order is approved from Web Orders; until then it is
   // kept out of the Order List.
-  webApprovedAt  DateTime?
+  webApprovedAt         DateTime?
   // Which staff user gets credit for working this web order — null until
   // someone touches it. Last-action-wins: updates to whoever most
   // recently changed customerResponse (OrdersService.updateCustomerResponse)
   // or approved it (OrdersService.approveWebOrder), no exceptions.
-  webHandledById String?
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
+  webHandledById        String?
+  // BD Courier's per-number delivery-history check, fetched once and kept
+  // here instead of re-querying their billed API on every page view (see
+  // BdCourierService.getOrderCheck). bdCourierCheckedPhone is the number
+  // this snapshot was fetched for — a mismatch against the order's
+  // current shippingPhone means a fresh fetch is owed, since the person
+  // changed.
+  bdCourierCheckedPhone String?
+  bdCourierCheckedAt    DateTime?
+  bdCourierResult       Json?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
 
   channel      Channel? @relation(fields: [channelId], references: [id])
   customer     Customer @relation(fields: [customerId], references: [id])

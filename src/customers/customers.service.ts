@@ -76,6 +76,47 @@ export class CustomersService {
     );
   }
 
+  // "Our Record" on New Order/Web Orders/Edit Order — our own order
+  // history for a phone number, alongside (not derived from) the external
+  // BD Courier lookup. "Shipped" here means ever physically handed to a
+  // courier at some point, not the order's current status.
+  async getPhoneSummary(phone: string) {
+    const customer = await this.prisma.customer.findFirst({
+      where: { phone },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (!customer) {
+      return {
+        isNewCustomer: true,
+        totalOrders: 0,
+        shippedOrders: 0,
+        lastName: null,
+        lastAddress: null,
+      };
+    }
+    const orders = await this.prisma.order.findMany({
+      where: { customerId: customer.id },
+      orderBy: { createdAt: 'desc' },
+      select: { status: true, shippingName: true, shippingAddress: true },
+    });
+    const everShippedStatuses = new Set([
+      'SHIPPED',
+      'PARTIAL',
+      'DELIVERED',
+      'PENDING_RETURN',
+      'RETURNED',
+      'LOST',
+    ]);
+    return {
+      isNewCustomer: orders.length === 0,
+      totalOrders: orders.length,
+      shippedOrders: orders.filter((o) => everShippedStatuses.has(o.status))
+        .length,
+      lastName: orders[0]?.shippingName ?? customer.name,
+      lastAddress: orders[0]?.shippingAddress ?? customer.address,
+    };
+  }
+
   async findAll(user: JwtPayload, search?: string, channelId?: string) {
     const resolved = await this.channelScope.resolveDirectFilter(
       user,
