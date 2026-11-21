@@ -30,23 +30,35 @@ async function main() {
   const superAdminRole = await prisma.role.findUniqueOrThrow({
     where: { name: 'Super Admin' },
   });
-  const passwordHash = await bcrypt.hash(DEFAULT_ADMIN.password, 10);
-  await prisma.user.upsert({
-    where: { email: DEFAULT_ADMIN.email },
-    update: {},
-    create: {
-      name: DEFAULT_ADMIN.name,
-      email: DEFAULT_ADMIN.email,
-      passwordHash,
-      roleId: superAdminRole.id,
-    },
+  // There is exactly one Super Admin, ever — if one already exists under a
+  // different email (e.g. created via `npm run create-super-admin`), skip
+  // rather than create a second one.
+  const existingSuperAdmin = await prisma.user.findFirst({
+    where: { roleId: superAdminRole.id, deletedAt: null },
   });
+  if (existingSuperAdmin && existingSuperAdmin.email !== DEFAULT_ADMIN.email) {
+    console.log(
+      `  Skipped — a Super Admin already exists: ${existingSuperAdmin.email}`,
+    );
+  } else {
+    const passwordHash = await bcrypt.hash(DEFAULT_ADMIN.password, 10);
+    await prisma.user.upsert({
+      where: { email: DEFAULT_ADMIN.email },
+      update: {},
+      create: {
+        name: DEFAULT_ADMIN.name,
+        email: DEFAULT_ADMIN.email,
+        passwordHash,
+        roleId: superAdminRole.id,
+      },
+    });
+    console.log(`  Super Admin login: ${DEFAULT_ADMIN.email}`);
+    console.log(
+      `  Super Admin password: ${DEFAULT_ADMIN.password} (change after first login)`,
+    );
+  }
 
   console.log('\nSeed complete.');
-  console.log(`  Super Admin login: ${DEFAULT_ADMIN.email}`);
-  console.log(
-    `  Super Admin password: ${DEFAULT_ADMIN.password} (change after first login)`,
-  );
   console.log(`  Channel: ${DEFAULT_CHANNEL.name} (${DEFAULT_CHANNEL.slug})`);
 }
 

@@ -10,6 +10,7 @@ import {
   ALL_ACCESS_PERMISSION,
   ChannelScopeService,
 } from '../common/channel-scope/channel-scope.service';
+import { FileStorageService } from '../common/file-storage/file-storage.service';
 import { JwtPayload } from '../auth/types/jwt-payload.type';
 import { CreateChannelDto } from './dto/create-channel.dto';
 import { UpdateChannelDto } from './dto/update-channel.dto';
@@ -19,6 +20,7 @@ export class ChannelsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly channelScope: ChannelScopeService,
+    private readonly fileStorage: FileStorageService,
   ) {}
 
   async create(dto: CreateChannelDto) {
@@ -132,19 +134,25 @@ export class ChannelsService {
         ...themeConfig,
       } as Prisma.InputJsonValue;
     }
-    return this.handleUniqueConstraints(() =>
+    const updated = await this.handleUniqueConstraints(() =>
       this.prisma.channel.update({ where: { id }, data }),
     );
+    if (dto.logoUrl !== undefined && dto.logoUrl !== existing.logoUrl) {
+      this.fileStorage.deleteUploadedFile(existing.logoUrl);
+    }
+    return updated;
   }
 
   // Soft delete: sets deletedAt + isActive=false. Never a hard delete — a
   // channel a customer once ordered from must keep resolving on old orders.
   async remove(id: string, user: JwtPayload) {
-    await this.findOne(id, user);
-    return this.prisma.channel.update({
+    const existing = await this.findOne(id, user);
+    const deleted = await this.prisma.channel.update({
       where: { id },
       data: { deletedAt: new Date(), isActive: false },
     });
+    this.fileStorage.deleteUploadedFile(existing.logoUrl);
+    return deleted;
   }
 
   private async handleUniqueConstraints<T>(fn: () => Promise<T>): Promise<T> {

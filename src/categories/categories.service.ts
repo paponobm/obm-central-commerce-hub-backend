@@ -5,11 +5,8 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
-import { unlink } from 'fs/promises';
-import { join } from 'path';
-import { ConfigService } from '@nestjs/config';
-import { v2 as cloudinary } from 'cloudinary';
 import { PrismaService } from '../prisma/prisma.service';
+import { FileStorageService } from '../common/file-storage/file-storage.service';
 import { CreateCategoryDto } from './dto/create-category.dto';
 import { UpdateCategoryDto } from './dto/update-category.dto';
 import { SetCategoryChannelsDto } from './dto/set-category-channels.dto';
@@ -18,14 +15,8 @@ import { SetCategoryChannelsDto } from './dto/set-category-channels.dto';
 export class CategoriesService {
   constructor(
     private readonly prisma: PrismaService,
-    private readonly config: ConfigService,
-  ) {
-    cloudinary.config({
-      cloud_name: this.config.get<string>('CLOUDINARY_CLOUD_NAME'),
-      api_key: this.config.get<string>('CLOUDINARY_API_KEY'),
-      api_secret: this.config.get<string>('CLOUDINARY_API_SECRET'),
-    });
-  }
+    private readonly fileStorage: FileStorageService,
+  ) {}
 
   async create(dto: CreateCategoryDto) {
     if (dto.parentId) {
@@ -74,7 +65,7 @@ export class CategoriesService {
     // otherwise — only once the swap has actually succeeded, and only the
     // old file, never the new one.
     if (dto.imageUrl !== undefined && dto.imageUrl !== existing.imageUrl) {
-      this.deleteUploadedFile(existing.imageUrl);
+      this.fileStorage.deleteUploadedFile(existing.imageUrl);
     }
     return updated;
   }
@@ -98,7 +89,7 @@ export class CategoriesService {
       where: { id },
       data: { deletedAt: new Date() },
     });
-    this.deleteUploadedFile(category.imageUrl);
+    this.fileStorage.deleteUploadedFile(category.imageUrl);
     return deleted;
   }
 
@@ -181,33 +172,6 @@ export class CategoriesService {
       await this.prisma.$transaction(writes);
     }
     return { success: true };
-  }
-
-  // Deletes the file from wherever it actually lives — this server's own
-  // /uploads/ directory, or Cloudinary — detected from the URL's own shape
-  // rather than the current STORAGE_DRIVER, since older categories can
-  // still point at whichever backend was active when they were uploaded.
-  // Anything else (an arbitrary external URL) is left untouched. Best-
-  // effort either way — missing/already-gone files are silently ignored,
-  // never something that should fail the request.
-  private deleteUploadedFile(imageUrl: string | null) {
-    if (!imageUrl) return;
-
-    const localMatch = imageUrl.match(/\/uploads\/([^/?#]+)$/);
-    if (localMatch) {
-      const filePath = join(process.cwd(), 'uploads', localMatch[1]);
-      unlink(filePath).catch(() => undefined);
-      return;
-    }
-
-    // e.g. https://res.cloudinary.com/<cloud>/image/upload/v169.../obm-
-    // sourcing/abc123.png -> public_id "obm-sourcing/abc123".
-    const cloudinaryMatch = imageUrl.match(
-      /res\.cloudinary\.com\/.+\/upload\/(?:v\d+\/)?(.+)\.[a-zA-Z0-9]+(?:[?#].*)?$/,
-    );
-    if (cloudinaryMatch) {
-      cloudinary.uploader.destroy(cloudinaryMatch[1]).catch(() => undefined);
-    }
   }
 
   // Walk up from the proposed new parent; if we ever reach `id`, setting

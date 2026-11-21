@@ -5,12 +5,16 @@ import {
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { FileStorageService } from '../common/file-storage/file-storage.service';
 import { CreateBrandDto } from './dto/create-brand.dto';
 import { UpdateBrandDto } from './dto/update-brand.dto';
 
 @Injectable()
 export class BrandsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly fileStorage: FileStorageService,
+  ) {}
 
   async create(dto: CreateBrandDto) {
     return this.handleUniqueConstraints(() =>
@@ -36,18 +40,24 @@ export class BrandsService {
   }
 
   async update(id: string, dto: UpdateBrandDto) {
-    await this.findOne(id);
-    return this.handleUniqueConstraints(() =>
+    const existing = await this.findOne(id);
+    const updated = await this.handleUniqueConstraints(() =>
       this.prisma.brand.update({ where: { id }, data: dto }),
     );
+    if (dto.logoUrl !== undefined && dto.logoUrl !== existing.logoUrl) {
+      this.fileStorage.deleteUploadedFile(existing.logoUrl);
+    }
+    return updated;
   }
 
   async remove(id: string) {
-    await this.findOne(id);
-    return this.prisma.brand.update({
+    const existing = await this.findOne(id);
+    const deleted = await this.prisma.brand.update({
       where: { id },
       data: { deletedAt: new Date() },
     });
+    this.fileStorage.deleteUploadedFile(existing.logoUrl);
+    return deleted;
   }
 
   private async handleUniqueConstraints<T>(fn: () => Promise<T>): Promise<T> {

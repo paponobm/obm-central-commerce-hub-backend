@@ -37,6 +37,21 @@ async function main() {
     where: { name: 'Super Admin' },
   });
 
+  // There is exactly one Super Admin, ever. The first run of this script
+  // creates it; every run after that against a DIFFERENT email is refused —
+  // re-run with the SAME email to reset that one account's password/name
+  // instead (the upsert below still supports that recovery case).
+  const existingSuperAdmin = await prisma.user.findFirst({
+    where: { roleId: superAdminRole.id, deletedAt: null },
+  });
+  if (existingSuperAdmin && existingSuperAdmin.email !== email) {
+    console.error(
+      `A Super Admin already exists: ${existingSuperAdmin.email}.\n` +
+        `Re-run with that same email to reset its password, or change it directly in the database.`,
+    );
+    process.exit(1);
+  }
+
   const passwordHash = await bcrypt.hash(password, 10);
   await prisma.user.upsert({
     where: { email },

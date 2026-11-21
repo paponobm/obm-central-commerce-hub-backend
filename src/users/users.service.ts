@@ -8,6 +8,7 @@ import {
 import { Prisma } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
 import { PrismaService } from '../prisma/prisma.service';
+import { FileStorageService } from '../common/file-storage/file-storage.service';
 import { CreateUserDto, PermissionsByScopeDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import {
@@ -56,7 +57,10 @@ export type UserWithPermissions = {
 
 @Injectable()
 export class UsersService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly fileStorage: FileStorageService,
+  ) {}
 
   async findByEmailWithPermissions(
     email: string,
@@ -132,6 +136,14 @@ export class UsersService {
     });
     if (!targetRole) {
       throw new NotFoundException(`Role ${dto.roleId} not found`);
+    }
+    // There is exactly one Super Admin, ever — created once via the
+    // create-super-admin script, never through this endpoint, not even by
+    // another Super Admin.
+    if (targetRole.name === ROLE_SUPER_ADMIN) {
+      throw new ForbiddenException(
+        'A Super Admin account can only be created via the create-super-admin script',
+      );
     }
     if (!assignableRoleNames(actorRoleName).includes(targetRole.name)) {
       throw new ForbiddenException(
@@ -272,6 +284,17 @@ export class UsersService {
           "A Super Admin's role can't be changed here",
         );
       }
+      // Same rule as create(), the other direction: nobody can be PROMOTED
+      // to Super Admin here either — that role only ever comes from the
+      // create-super-admin script, so there's exactly one.
+      if (
+        targetRole.name === ROLE_SUPER_ADMIN &&
+        existing.role.name !== ROLE_SUPER_ADMIN
+      ) {
+        throw new ForbiddenException(
+          'A Super Admin account can only be created via the create-super-admin script',
+        );
+      }
       targetRoleName = targetRole.name;
     }
 
@@ -378,6 +401,11 @@ export class UsersService {
         });
       }),
     );
+    // A replaced (or cleared) avatar leaves its old file orphaned on
+    // disk/Cloudinary otherwise — only the old file, never the new one.
+    if (dto.avatarUrl !== undefined && dto.avatarUrl !== existing.avatarUrl) {
+      this.fileStorage.deleteUploadedFile(existing.avatarUrl);
+    }
     return this.toListItem(user);
   }
 
@@ -420,6 +448,7 @@ export class UsersService {
         email: `deleted-${Date.now()}-${existing.email}`,
       },
     });
+    this.fileStorage.deleteUploadedFile(existing.avatarUrl);
     return { id };
   }
 

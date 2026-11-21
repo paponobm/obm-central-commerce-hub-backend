@@ -12,6 +12,7 @@ import {
   ALL_ACCESS_PERMISSION,
   ChannelScopeService,
 } from '../common/channel-scope/channel-scope.service';
+import { FileStorageService } from '../common/file-storage/file-storage.service';
 import { JwtPayload } from '../auth/types/jwt-payload.type';
 import { SettingsService } from '../settings/settings.service';
 import { CreateProductDto } from './dto/create-product.dto';
@@ -28,6 +29,7 @@ export class ProductsService {
     private readonly prisma: PrismaService,
     private readonly channelScope: ChannelScopeService,
     private readonly settings: SettingsService,
+    private readonly fileStorage: FileStorageService,
   ) {}
 
   // Product has no channelId column — visibility for a restricted user
@@ -337,7 +339,7 @@ export class ProductsService {
   }
 
   async update(id: string, dto: UpdateProductDto, user: JwtPayload) {
-    await this.requireActiveProduct(id);
+    const existing = await this.requireActiveProduct(id);
     await this.assertVisibleById(user, id);
     // variants/channelIds/categoryIds/initialStock are create-only (not
     // Product scalar columns) — editing variants happens through the
@@ -359,7 +361,7 @@ export class ProductsService {
         ? { specifications: specifications as unknown as Prisma.InputJsonValue }
         : {}),
     };
-    return this.handleUniqueConstraints(() =>
+    const result = await this.handleUniqueConstraints(() =>
       runTransaction(this.prisma, async (tx) => {
         const updated = await tx.product.update({
           where: { id },
@@ -386,6 +388,16 @@ export class ProductsService {
         return updated;
       }),
     );
+    // A replaced (or cleared) thumbnail leaves its old file orphaned on
+    // disk/Cloudinary otherwise — only the old file, never the new one,
+    // and only once the swap has actually succeeded.
+    if (
+      dto.thumbnailUrl !== undefined &&
+      dto.thumbnailUrl !== existing.thumbnailUrl
+    ) {
+      this.fileStorage.deleteUploadedFile(existing.thumbnailUrl);
+    }
+    return result;
   }
 
   // The master product is shared by every store, so deleting it is a
@@ -396,11 +408,27 @@ export class ProductsService {
         'Only unrestricted users can delete a product shared across stores',
       );
     }
-    await this.requireActiveProduct(id);
-    return this.prisma.product.update({
+    const existing = await this.requireActiveProduct(id);
+    const [images, variants] = await Promise.all([
+      this.prisma.productImage.findMany({
+        where: { productId: id },
+        select: { url: true },
+      }),
+      this.prisma.productVariant.findMany({
+        where: { productId: id, deletedAt: null },
+        select: { imageUrl: true },
+      }),
+    ]);
+    const deleted = await this.prisma.product.update({
       where: { id },
       data: { deletedAt: new Date(), isActive: false },
     });
+    this.fileStorage.deleteUploadedFile(existing.thumbnailUrl);
+    images.forEach((image) => this.fileStorage.deleteUploadedFile(image.url));
+    variants.forEach((variant) =>
+      this.fileStorage.deleteUploadedFile(variant.imageUrl),
+    );
+    return deleted;
   }
 
   async addImage(productId: string, dto: AddProductImageDto, user: JwtPayload) {
@@ -420,6 +448,7 @@ export class ProductsService {
       throw new NotFoundException(`Image ${imageId} not found on this product`);
     }
     await this.prisma.productImage.delete({ where: { id: imageId } });
+    this.fileStorage.deleteUploadedFile(image.url);
     return { success: true };
   }
 
@@ -558,7 +587,7 @@ export class ProductsService {
     if (!existing) {
       throw new NotFoundException(`Variant ${variantId} not found`);
     }
-    return this.handleUniqueConstraints(() =>
+    const result = await this.handleUniqueConstraints(() =>
       runTransaction(this.prisma, async (tx) => {
         if (dto.isDefault) {
           await this.clearOtherDefaults(tx, productId, variantId);
@@ -581,6 +610,12 @@ export class ProductsService {
         return updated;
       }),
     );
+    // Same orphan-file cleanup as the product thumbnail — only the
+    // replaced old image, only once the swap has actually succeeded.
+    if (dto.imageUrl !== undefined && dto.imageUrl !== existing.imageUrl) {
+      this.fileStorage.deleteUploadedFile(existing.imageUrl);
+    }
+    return result;
   }
 
   async removeVariant(productId: string, variantId: string, user: JwtPayload) {
@@ -592,7 +627,7 @@ export class ProductsService {
     if (!existing) {
       throw new NotFoundException(`Variant ${variantId} not found`);
     }
-    return runTransaction(this.prisma, async (tx) => {
+    const result = await runTransaction(this.prisma, async (tx) => {
       const updated = await tx.productVariant.update({
         where: { id: variantId },
         data: { deletedAt: new Date() },
@@ -606,6 +641,8 @@ export class ProductsService {
       await this.recomputeBasePriceFromVariants(tx, productId);
       return updated;
     });
+    this.fileStorage.deleteUploadedFile(existing.imageUrl);
+    return result;
   }
 
   // One row per active channel, merged with this product's ProductChannel
