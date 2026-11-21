@@ -97,6 +97,10 @@ export class ProductsService {
         : {}),
     };
 
+    if (productData.slug) {
+      await this.assertSlugAvailable(productData.slug);
+    }
+
     // Validate every foreign reference up front — a stale id (e.g. a
     // category removed in another tab after this form was opened) would
     // otherwise fail deep inside the transaction below as a raw Prisma
@@ -138,6 +142,14 @@ export class ProductsService {
         throw new NotFoundException(
           'One or more channels were not found or are inactive',
         );
+      }
+      // Same slug gets reused across every channelId below — check it
+      // against each channel up front, before anything is created.
+      const channelSlug = productData.slug?.trim() || slugify(productData.name);
+      if (channelSlug) {
+        for (const channelId of uniqueIds) {
+          await this.assertChannelSlugAvailable(channelId, channelSlug);
+        }
       }
     }
 
@@ -341,6 +353,9 @@ export class ProductsService {
   async update(id: string, dto: UpdateProductDto, user: JwtPayload) {
     const existing = await this.requireActiveProduct(id);
     await this.assertVisibleById(user, id);
+    if (dto.slug && dto.slug !== existing.slug) {
+      await this.assertSlugAvailable(dto.slug, id);
+    }
     // variants/channelIds/categoryIds/initialStock are create-only (not
     // Product scalar columns) — editing variants happens through the
     // dedicated variant endpoints below instead, so they're dropped here
@@ -715,6 +730,9 @@ export class ProductsService {
       existing?.slug ||
       slugify(dto.name ?? product.name) ||
       `product-${productId.slice(-8)}`;
+    if (slug !== existing?.slug) {
+      await this.assertChannelSlugAvailable(channelId, slug, productId);
+    }
     const price = dto.price ?? existing?.price ?? product.basePrice;
     const compareAtPrice =
       dto.compareAtPrice ?? existing?.compareAtPrice ?? product.compareAtPrice;
@@ -832,6 +850,52 @@ export class ProductsService {
       throw new NotFoundException(`Channel ${channelId} not found`);
     }
     return channel;
+  }
+
+  // slug has no DB-level unique constraint (see the schema comment) — only
+  // an ACTIVE product can block another one from taking its slug; a
+  // soft-deleted one's slug is free to reuse. excludeId skips the product
+  // being updated itself, so leaving its own slug untouched never
+  // conflicts with itself. Mirrors CategoriesService.assertSlugAvailable.
+  private async assertSlugAvailable(slug: string, excludeId?: string) {
+    const conflict = await this.prisma.product.findFirst({
+      where: {
+        slug,
+        deletedAt: null,
+        ...(excludeId ? { id: { not: excludeId } } : {}),
+      },
+      select: { id: true },
+    });
+    if (conflict) {
+      throw new ConflictException('Product with this slug already exists');
+    }
+  }
+
+  // Same idea, one level down: a ProductChannel row survives its parent
+  // product being soft-deleted (no cascade on soft delete), so without
+  // this a deleted product's old channel slug would block a different
+  // product from ever publishing under that slug on the same channel.
+  // excludeProductId skips the product being published itself, so
+  // re-publishing with its own unchanged slug never conflicts with itself.
+  private async assertChannelSlugAvailable(
+    channelId: string,
+    slug: string,
+    excludeProductId?: string,
+  ) {
+    const conflict = await this.prisma.productChannel.findFirst({
+      where: {
+        channelId,
+        slug,
+        ...(excludeProductId ? { productId: { not: excludeProductId } } : {}),
+        product: { deletedAt: null },
+      },
+      select: { id: true },
+    });
+    if (conflict) {
+      throw new ConflictException(
+        'Another product already uses this slug on this store',
+      );
+    }
   }
 
   private async handleUniqueConstraints<T>(fn: () => Promise<T>): Promise<T> {

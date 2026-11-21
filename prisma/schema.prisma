@@ -409,11 +409,14 @@ model Product {
   // Rich-text body (HTML, from the New/Edit Product page's editor) — the
   // long-form section on the product detail page.
   description        String?
-  // Optional, globally-unique, admin-chosen URL slug — the default used
-  // when publishing to a channel that doesn't already have its own
-  // ProductChannel.slug override. Product itself has no public URL; this
-  // exists purely as that shared default (see ProductsService.create).
-  slug               String?   @unique
+  // Optional, admin-chosen URL slug — the default used when publishing to
+  // a channel that doesn't already have its own ProductChannel.slug
+  // override. Product itself has no public URL; this exists purely as
+  // that shared default (see ProductsService.create). No DB-level unique
+  // constraint — only an ACTIVE product can block another one from taking
+  // its slug (see ProductsService.assertSlugAvailable); a soft-deleted
+  // product's slug is free to reuse, same precedent as Category.slug.
+  slug               String?
   // Free-form key/value rows (e.g. "Origin" → "কক্সবাজার") shown as a
   // specs table on the product detail page. [{ key, value }, ...].
   specifications     Json?
@@ -478,6 +481,7 @@ model Product {
 
   @@index([categoryId])
   @@index([brandId])
+  @@index([slug])
   @@map("products")
 }
 
@@ -557,7 +561,11 @@ model ProductChannel {
   productId      String
   channelId      String
   name           String? // overrides Product.name on this channel
-  slug           String // unique per channel, used in /store/:slug/products/:slug
+  // Unique per channel among products whose parent is still active, used
+  // in /store/:slug/products/:slug — no DB-level unique constraint, so a
+  // soft-deleted product's slug on this channel is free for another
+  // product to reuse (see ProductsService.assertChannelSlugAvailable).
+  slug           String
   description    String?
   price          Decimal  @db.Decimal(12, 2)
   compareAtPrice Decimal? @db.Decimal(12, 2)
@@ -573,7 +581,7 @@ model ProductChannel {
   channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
 
   @@unique([productId, channelId])
-  @@unique([channelId, slug])
+  @@index([channelId, slug])
   @@index([channelId, isPublished])
   @@map("product_channels")
 }
