@@ -17,7 +17,7 @@ import { PermissionsGuard } from '../auth/guards/permissions.guard';
 import { RequirePermissions } from '../auth/decorators/require-permissions.decorator';
 
 const ALLOWED_MIME_TYPES = /^image\/(jpeg|png|webp|gif)$/;
-const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB
+const MAX_FILE_SIZE = 1 * 1024 * 1024; // 1MB
 
 @Controller('admin/uploads')
 @UseGuards(JwtAuthGuard, PermissionsGuard)
