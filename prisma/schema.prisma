@@ -469,6 +469,12 @@ model Product {
   // every existing isActive check elsewhere (storefront visibility, etc.)
   // already treats it as fully hidden with no other code needing to change.
   isDraft            Boolean   @default(false)
+  // New/Edit Product page's SEO tab. All optional — the storefront's own
+  // <head> rendering already falls back to name/shortDescription wherever
+  // these are blank, so nothing elsewhere needs to change to tolerate that.
+  metaTitle          String?
+  metaDescription    String?
+  focusKeywords      String[] @default([])
   deletedAt          DateTime?
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt

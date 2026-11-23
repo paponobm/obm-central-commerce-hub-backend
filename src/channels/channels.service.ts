@@ -123,12 +123,12 @@ export class ChannelsService {
     const existing = await this.findOne(id, user);
     const { themeConfig, ...rest } = dto;
     const data: Prisma.ChannelUpdateInput = { ...rest };
+    const existingConfig =
+      (existing.themeConfig as Prisma.JsonObject | null) ?? {};
     // Merge, not replace — themeConfig will grow more sub-keys (banner,
     // WhatsApp number, ...) over time, and a partial save here must not
     // wipe sub-keys this request didn't touch.
     if (themeConfig !== undefined) {
-      const existingConfig =
-        (existing.themeConfig as Prisma.JsonObject | null) ?? {};
       data.themeConfig = {
         ...existingConfig,
         ...themeConfig,
@@ -139,6 +139,21 @@ export class ChannelsService {
     );
     if (dto.logoUrl !== undefined && dto.logoUrl !== existing.logoUrl) {
       this.fileStorage.deleteUploadedFile(existing.logoUrl);
+    }
+    // Hero slide images only ever live inside this JSON blob, so nothing
+    // else ever notices when a slide is removed or its image replaced —
+    // without this, every such edit leaves the old upload orphaned on
+    // disk/Cloudinary forever. Same reasoning as logoUrl above.
+    if (themeConfig?.heroSlides !== undefined) {
+      const oldImages = (
+        (existingConfig.heroSlides as { image?: string }[] | undefined) ?? []
+      )
+        .map((slide) => slide?.image)
+        .filter((url): url is string => !!url);
+      const newImages = new Set(themeConfig.heroSlides.map((s) => s.image));
+      for (const url of oldImages) {
+        if (!newImages.has(url)) this.fileStorage.deleteUploadedFile(url);
+      }
     }
     return updated;
   }

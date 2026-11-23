@@ -6,6 +6,7 @@ import {
   IsNumber,
   IsOptional,
   IsString,
+  MaxLength,
   Min,
   MinLength,
   ValidateNested,
@@ -145,4 +146,22 @@ export class CreateProductDto {
   @ArrayMaxSize(50)
   @IsString({ each: true })
   categoryIds?: string[];
+
+  // New/Edit Product page's SEO tab.
+  @IsOptional()
+  @IsString()
+  @MaxLength(60)
+  metaTitle?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(160)
+  metaDescription?: string;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(20)
+  @IsString({ each: true })
+  @MinLength(1, { each: true })
+  focusKeywords?: string[];
 }
