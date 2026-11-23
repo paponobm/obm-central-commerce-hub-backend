@@ -96,6 +96,13 @@ export class CreateProductDto {
   @IsBoolean()
   isActive?: boolean;
 
+  // Set by the New Product page's "Save as Draft" button. The service
+  // forces isActive to false whenever this is true, regardless of what
+  // isActive was sent as — never trust the client for that pairing.
+  @IsOptional()
+  @IsBoolean()
+  isDraft?: boolean;
+
   @IsOptional()
   @IsBoolean()
   hasVariants?: boolean;

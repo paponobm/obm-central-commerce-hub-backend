@@ -77,6 +77,7 @@ export class UsersController {
       dto,
       currentUser.sub,
       currentUser.roleName,
+      currentUser.permissions,
     );
   }
 

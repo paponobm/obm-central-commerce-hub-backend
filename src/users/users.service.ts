@@ -227,6 +227,7 @@ export class UsersService {
     dto: UpdateUserDto,
     actorUserId: string,
     actorRoleName: string,
+    actorPermissions: string[],
   ) {
     const existing = await this.prisma.user.findFirst({
       where: { id, deletedAt: null },
@@ -250,14 +251,41 @@ export class UsersService {
       );
     }
 
-    // Granting/editing permissions & stores (the Access panel) is Super
-    // Admin only — an Admin can still edit a Manager/Member's own fields
-    // above (name, email, role within what they're allowed to assign,
-    // active flag), just not their access.
-    if (dto.permissions !== undefined && actorRoleName !== ROLE_SUPER_ADMIN) {
+    // Granting/editing permissions & stores (the Access panel) is allowed
+    // for Super Admin (anyone) and for Admin — but only on a target role
+    // Admin can already manage (Manager/Member/Agent), which the
+    // allowed.includes check above has already guaranteed by this point.
+    // Neither can touch another Admin's or a Super Admin's access.
+    if (
+      dto.permissions !== undefined &&
+      actorRoleName !== ROLE_SUPER_ADMIN &&
+      actorRoleName !== ROLE_ADMIN
+    ) {
       throw new ForbiddenException(
-        'Only a Super Admin can manage permissions & stores',
+        'Only a Super Admin or Admin can manage permissions & stores',
       );
+    }
+
+    // An Admin actor can never grant a permission they don't themselves
+    // hold — the frontend hides those toggles, but that's not a trust
+    // boundary on its own; this is the real enforcement. Super Admin is
+    // exempt: its own permission set is always the fixed full catalog
+    // already (see sanitizePermissions), so there's nothing to restrict.
+    if (dto.permissions !== undefined && actorRoleName === ROLE_ADMIN) {
+      const ownKeys = new Set(actorPermissions);
+      dto.permissions = {
+        allStores: dto.permissions.allStores?.filter((k) => ownKeys.has(k)),
+        byChannel: dto.permissions.byChannel
+          ? Object.fromEntries(
+              Object.entries(dto.permissions.byChannel).map(
+                ([channelId, keys]) => [
+                  channelId,
+                  keys.filter((k) => ownKeys.has(k)),
+                ],
+              ),
+            )
+          : dto.permissions.byChannel,
+      };
     }
 
     let targetRoleName = existing.role.name;

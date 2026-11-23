@@ -461,6 +461,14 @@ model Product {
   // until an admin explicitly sets one.
   thumbnailUrl       String?
   isActive           Boolean   @default(true)
+  // true = created via the New Product page's "Save as Draft" button and
+  // never actually published — kept distinct from isActive:false (an admin
+  // explicitly deactivating a once-live product) purely so the admin
+  // Products list's status filter can tell "draft" and "inactive" apart.
+  // A draft is always ALSO isActive:false (see ProductsService.create), so
+  // every existing isActive check elsewhere (storefront visibility, etc.)
+  // already treats it as fully hidden with no other code needing to change.
+  isDraft            Boolean   @default(false)
   deletedAt          DateTime?
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt

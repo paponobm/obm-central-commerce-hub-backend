@@ -96,6 +96,13 @@ export class ProductsService {
         ? { specifications: specifications as unknown as Prisma.InputJsonValue }
         : {}),
     };
+    // A draft is never active and never published, no matter what the
+    // client sent for isActive/channelIds — never trust that pairing from
+    // the frontend alone.
+    if (createData.isDraft) {
+      createData.isActive = false;
+    }
+    const effectiveChannelIds = createData.isDraft ? undefined : channelIds;
 
     if (productData.slug) {
       await this.assertSlugAvailable(productData.slug);
@@ -133,8 +140,8 @@ export class ProductsService {
         throw new NotFoundException('One or more categories were not found');
       }
     }
-    if (channelIds?.length) {
-      const uniqueIds = [...new Set(channelIds)];
+    if (effectiveChannelIds?.length) {
+      const uniqueIds = [...new Set(effectiveChannelIds)];
       const found = await this.prisma.channel.count({
         where: { id: { in: uniqueIds }, deletedAt: null, isActive: true },
       });
@@ -226,8 +233,8 @@ export class ProductsService {
           });
         }
 
-        if (channelIds?.length) {
-          for (const channelId of channelIds) {
+        if (effectiveChannelIds?.length) {
+          for (const channelId of effectiveChannelIds) {
             const slug =
               productData.slug?.trim() ||
               slugify(productData.name) ||
@@ -376,6 +383,11 @@ export class ProductsService {
         ? { specifications: specifications as unknown as Prisma.InputJsonValue }
         : {}),
     };
+    // Same pairing as create() — a draft is never active, regardless of
+    // what isActive was sent alongside it.
+    if (updateData.isDraft === true) {
+      updateData.isActive = false;
+    }
     const result = await this.handleUniqueConstraints(() =>
       runTransaction(this.prisma, async (tx) => {
         const updated = await tx.product.update({
