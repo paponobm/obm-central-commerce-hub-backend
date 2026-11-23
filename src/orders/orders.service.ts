@@ -6,6 +6,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import {
+  CustomerResponseStatus,
   IntegrationProvider,
   OrderSource,
   OrderStatus,
@@ -212,7 +213,11 @@ export class OrdersService {
         // literal would collide and silently drop the first.
         ...(user.roleName === ROLE_AGENT
           ? filters.includeWebUnapproved
-            ? { AND: [{ OR: [{ createdById: user.sub }, { source: 'WEBSITE' }] }] }
+            ? {
+                AND: [
+                  { OR: [{ createdById: user.sub }, { source: 'WEBSITE' }] },
+                ],
+              }
             : {
                 AND: [
                   {
@@ -334,6 +339,7 @@ export class OrdersService {
       lastActivity,
       statusEnteredAt,
       responseEnteredAt,
+      previousStageChange,
     ] = await Promise.all([
       this.getCustomerStats(customerIds),
       this.getOrderSequenceNumbers(customerIds),
@@ -345,6 +351,7 @@ export class OrdersService {
       this.getLastOrderActivity(orderIds),
       this.getStatusEnteredAt(orderIds),
       this.getCustomerResponseEnteredAt(orderIds),
+      this.getPreviousStageChange(orderIds),
     ]);
     return orders.map((o) => {
       const stats = customerStats.get(o.customerId);
@@ -368,6 +375,9 @@ export class OrdersService {
         // had a response set, falls back to statusEnteredAt (not createdAt)
         // — it's just been sitting wherever it landed on becoming Pending.
         responseEnteredAt: responseEnteredAt.get(o.id) ?? enteredStatusAt,
+        // Web Orders list's "From: {stage}" line — null for an order that's
+        // never transitioned. See getPreviousStageChange.
+        previousStageChange: previousStageChange.get(o.id) ?? null,
         customer: {
           ...o.customer,
           successRate: stats?.successRate ?? null,
@@ -943,7 +953,8 @@ export class OrdersService {
       if (
         prev &&
         prev.changedBy?.name === h.changedBy?.name &&
-        prev.createdAt.getTime() - h.createdAt.getTime() <= STATUS_BURST_WINDOW_MS
+        prev.createdAt.getTime() - h.createdAt.getTime() <=
+          STATUS_BURST_WINDOW_MS
       ) {
         continue;
       }
@@ -1429,6 +1440,90 @@ export class OrdersService {
     return entered;
   }
 
+  // For each order, whichever of its status / customerResponse / "became
+  // approved" most recently actually changed, and what it changed FROM —
+  // the raw material the Web Orders list's "From: {stage}" line is built
+  // from (frontend lib/web-orders.ts's previousWebOrderStage, run against
+  // this plus the row's own current fields). Compares timestamps across
+  // all three change types and keeps only the single newest one per order,
+  // since each of this app's endpoints only ever changes one of them at a
+  // time (updateStatus / updateCustomerResponse / approveWebOrder).
+  //
+  // An order that has never transitioned gets no entry here — a brand-new
+  // order sitting in its very first stage has no "from" to show. That's
+  // also why the very first OrderStatusHistory row ever written for an
+  // order (fromStatus: null, "Order created" — see createOrder) is
+  // excluded: it marks creation, not a transition.
+  private async getPreviousStageChange(orderIds: string[]) {
+    type Change =
+      | { field: 'status'; previousStatus: OrderStatus }
+      | {
+          field: 'customerResponse';
+          previousCustomerResponse: CustomerResponseStatus | null;
+        }
+      | { field: 'webApproved' };
+    const result = new Map<string, Change>();
+    if (orderIds.length === 0) return result;
+
+    const [statusChanges, responseChanges, approvals] = await Promise.all([
+      this.prisma.orderStatusHistory.findMany({
+        where: { orderId: { in: orderIds }, fromStatus: { not: null } },
+        orderBy: { createdAt: 'desc' },
+        distinct: ['orderId'],
+        select: { orderId: true, fromStatus: true, createdAt: true },
+      }),
+      this.prisma.auditLog.findMany({
+        where: {
+          entityType: 'Order',
+          entityId: { in: orderIds },
+          action: 'order.customer_response_change',
+        },
+        orderBy: { createdAt: 'desc' },
+        distinct: ['entityId'],
+        select: { entityId: true, before: true, createdAt: true },
+      }),
+      this.prisma.auditLog.findMany({
+        where: {
+          entityType: 'Order',
+          entityId: { in: orderIds },
+          action: 'order.web_approved',
+        },
+        orderBy: { createdAt: 'desc' },
+        distinct: ['entityId'],
+        select: { entityId: true, createdAt: true },
+      }),
+    ]);
+
+    const latestAt = new Map<string, Date>();
+    const apply = (orderId: string, at: Date, change: Change) => {
+      const current = latestAt.get(orderId);
+      if (current && current >= at) return;
+      latestAt.set(orderId, at);
+      result.set(orderId, change);
+    };
+
+    for (const s of statusChanges) {
+      apply(s.orderId, s.createdAt, {
+        field: 'status',
+        previousStatus: s.fromStatus!,
+      });
+    }
+    for (const r of responseChanges) {
+      const before = r.before as {
+        customerResponse?: CustomerResponseStatus | null;
+      } | null;
+      apply(r.entityId, r.createdAt, {
+        field: 'customerResponse',
+        previousCustomerResponse: before?.customerResponse ?? null,
+      });
+    }
+    for (const a of approvals) {
+      apply(a.entityId, a.createdAt, { field: 'webApproved' });
+    }
+
+    return result;
+  }
+
   // Notes added from Order actions, grouped by order, oldest first.
   private async getAdminNotes(orderIds: string[]) {
     const notes = new Map<
@@ -1530,15 +1625,16 @@ export class OrdersService {
     await this.assertChannelAccess(user, order.channelId);
     this.assertAgentOwnsOrder(user, order.createdById, order.source);
 
-    const [timeline, auditFlags, statusEnteredAt, responseEnteredAt] = await Promise.all([
-      this.buildTimeline(order.id, order.statusHistory),
-      this.getAuditFlags(
-        [order.id],
-        ['order.web_approved', 'order.created_from_lead'],
-      ),
-      this.getStatusEnteredAt([order.id]),
-      this.getCustomerResponseEnteredAt([order.id]),
-    ]);
+    const [timeline, auditFlags, statusEnteredAt, responseEnteredAt] =
+      await Promise.all([
+        this.buildTimeline(order.id, order.statusHistory),
+        this.getAuditFlags(
+          [order.id],
+          ['order.web_approved', 'order.created_from_lead'],
+        ),
+        this.getStatusEnteredAt([order.id]),
+        this.getCustomerResponseEnteredAt([order.id]),
+      ]);
     const flags = auditFlags.get(order.id);
     const enteredStatusAt = this.resolveStatusEnteredAt(
       statusEnteredAt.get(order.id) ?? order.createdAt,
@@ -2616,7 +2712,10 @@ export class OrdersService {
           entityType: 'Order',
           entityId: id,
           before: { overdueResponse: order.overdueResponse },
-          after: { overdueResponse: dto.overdueResponse, note: dto.note ?? null },
+          after: {
+            overdueResponse: dto.overdueResponse,
+            note: dto.note ?? null,
+          },
         },
       }),
     ]);
