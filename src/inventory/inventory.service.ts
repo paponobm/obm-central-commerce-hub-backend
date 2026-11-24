@@ -73,12 +73,18 @@ export class InventoryService {
       // breakdown instead of just the one combined number. reservedStock
       // has no per-variant equivalent in the schema, so each variant row
       // only ever shows its own stock as "available."
-      if (filters.expandVariants && row.product.hasVariants && row.product.variants.length > 0) {
+      if (
+        filters.expandVariants &&
+        row.product.hasVariants &&
+        row.product.variants.length > 0
+      ) {
         return row.product.variants.map((v) => ({
           productId: row.productId,
           variantId: v.id,
           sku: v.sku,
-          name: v.unitLabel ? `${row.product.name} (${v.unitLabel})` : row.product.name,
+          name: v.unitLabel
+            ? `${row.product.name} (${v.unitLabel})`
+            : row.product.name,
           imageUrl: v.imageUrl ?? baseImageUrl,
           isActive: row.product.isActive,
           currentStock: v.stock,
@@ -86,6 +92,11 @@ export class InventoryService {
           availableStock: v.stock,
           lowStockThreshold: row.lowStockThreshold,
           isLowStock: v.stock <= row.lowStockThreshold,
+          // Expiry is tracked once per product (its own batch), not
+          // per-variant — every variant row shares the master Inventory
+          // row's own dates.
+          expiryDate: row.expiryDate,
+          expiryAlertDays: row.expiryAlertDays,
           updatedAt: v.updatedAt,
         }));
       }
@@ -103,6 +114,8 @@ export class InventoryService {
           availableStock: row.currentStock - row.reservedStock,
           lowStockThreshold: row.lowStockThreshold,
           isLowStock: row.currentStock <= row.lowStockThreshold,
+          expiryDate: row.expiryDate,
+          expiryAlertDays: row.expiryAlertDays,
           updatedAt: row.updatedAt,
         },
       ];
@@ -173,7 +186,8 @@ export class InventoryService {
         id: row.product.id,
         sku: row.product.sku,
         name: row.product.name,
-        imageUrl: row.product.thumbnailUrl ?? row.product.images[0]?.url ?? null,
+        imageUrl:
+          row.product.thumbnailUrl ?? row.product.images[0]?.url ?? null,
       },
     }));
   }
@@ -203,7 +217,8 @@ export class InventoryService {
         id: row.product.id,
         sku: row.product.sku,
         name: row.product.name,
-        imageUrl: row.product.thumbnailUrl ?? row.product.images[0]?.url ?? null,
+        imageUrl:
+          row.product.thumbnailUrl ?? row.product.images[0]?.url ?? null,
       },
     }));
   }

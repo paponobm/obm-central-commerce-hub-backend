@@ -608,12 +608,17 @@ model ProductChannel {
 // computed at read time or returned via a view/select. Storing it would let
 // it drift out of sync with the two source columns.
 model Inventory {
-  id                String   @id @default(cuid())
-  productId         String   @unique
-  currentStock      Int      @default(0)
-  reservedStock     Int      @default(0)
-  lowStockThreshold Int      @default(10)
-  updatedAt         DateTime @updatedAt
+  id                String    @id @default(cuid())
+  productId         String    @unique
+  currentStock      Int       @default(0)
+  reservedStock     Int       @default(0)
+  lowStockThreshold Int       @default(10)
+  manufacturingDate DateTime?
+  expiryDate        DateTime?
+  // Days before expiryDate to start flagging this product as "Expiring
+  // Soon" (product list Stock Status column / future dashboard alert).
+  expiryAlertDays   Int?
+  updatedAt         DateTime  @updatedAt
 
   product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
 

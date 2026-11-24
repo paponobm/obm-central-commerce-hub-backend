@@ -81,13 +81,17 @@ export class ProductsService {
     await this.assertProductVisible(user, { channels });
   }
 
-  async create(dto: CreateProductDto) {
+  async create(dto: CreateProductDto, user?: JwtPayload) {
     const {
       variants,
       channelIds,
       categoryIds,
       initialStock,
       specifications,
+      manufacturingDate,
+      expiryDate,
+      expiryAlertDays,
+      lowStockThreshold,
       ...productData
     } = dto;
     const createData: Prisma.ProductUncheckedCreateInput = {
@@ -167,6 +171,15 @@ export class ProductsService {
       this.prisma.$transaction(async (tx) => {
         const { defaultLowStockThreshold } = await this.settings.get();
         const product = await tx.product.create({ data: createData });
+        await tx.auditLog.create({
+          data: {
+            userId: user?.sub,
+            action: 'product.create',
+            entityType: 'Product',
+            entityId: product.id,
+            after: { name: product.name, isDraft: product.isDraft },
+          },
+        });
 
         if (variants?.length) {
           // At most one default — the admin UI enforces this with a radio
@@ -205,7 +218,12 @@ export class ProductsService {
             productId: product.id,
             currentStock: startingStock,
             reservedStock: 0,
-            lowStockThreshold: defaultLowStockThreshold,
+            lowStockThreshold: lowStockThreshold ?? defaultLowStockThreshold,
+            manufacturingDate: manufacturingDate
+              ? new Date(manufacturingDate)
+              : undefined,
+            expiryDate: expiryDate ? new Date(expiryDate) : undefined,
+            expiryAlertDays,
           },
         });
 
@@ -374,6 +392,10 @@ export class ProductsService {
       categoryIds,
       initialStock,
       specifications,
+      manufacturingDate,
+      expiryDate,
+      expiryAlertDays,
+      lowStockThreshold,
       ...productData
     } = dto;
     /* eslint-enable @typescript-eslint/no-unused-vars */
@@ -412,6 +434,32 @@ export class ProductsService {
             },
           });
         }
+        // Stock & Delivery tab fields all live on Inventory, not Product —
+        // only touch the row when at least one of them was actually sent.
+        if (
+          manufacturingDate !== undefined ||
+          expiryDate !== undefined ||
+          expiryAlertDays !== undefined ||
+          lowStockThreshold !== undefined
+        ) {
+          await tx.inventory.update({
+            where: { productId: id },
+            data: {
+              ...(manufacturingDate !== undefined
+                ? {
+                    manufacturingDate: manufacturingDate
+                      ? new Date(manufacturingDate)
+                      : null,
+                  }
+                : {}),
+              ...(expiryDate !== undefined
+                ? { expiryDate: expiryDate ? new Date(expiryDate) : null }
+                : {}),
+              ...(expiryAlertDays !== undefined ? { expiryAlertDays } : {}),
+              ...(lowStockThreshold !== undefined ? { lowStockThreshold } : {}),
+            },
+          });
+        }
         return updated;
       }),
     );
@@ -424,7 +472,91 @@ export class ProductsService {
     ) {
       this.fileStorage.deleteUploadedFile(existing.thumbnailUrl);
     }
+    await this.logProductFieldChanges(existing, result, user.sub);
     return result;
+  }
+
+  // Activity Log entry for a product.update — only the handful of fields an
+  // admin actually cares to see change, compared before vs after the write
+  // actually persisted (not the raw dto, since isDraft/isActive get paired
+  // server-side). Silent no-op when nothing tracked actually changed, so a
+  // save that only touched SEO/specifications doesn't add log noise.
+  private async logProductFieldChanges(
+    existing: Prisma.ProductGetPayload<object>,
+    updated: Prisma.ProductGetPayload<object>,
+    userId: string,
+  ) {
+    // Every admin-editable Product column — String() comparison below
+    // naturally stringifies arrays (forWho/focusKeywords) too, so a single
+    // pass covers every field type here. Only specifications/Origin (a
+    // nested JSON blob) needs its own handling, just below.
+    const trackedFields = [
+      'sku',
+      'name',
+      'slogan',
+      'shortDescription',
+      'description',
+      'slug',
+      'forWho',
+      'costPrice',
+      'basePrice',
+      'compareAtPrice',
+      'unit',
+      'importCountry',
+      'categoryId',
+      'brandId',
+      'hasVariants',
+      'variantOptionLabel',
+      'thumbnailUrl',
+      'isActive',
+      'isDraft',
+      'metaTitle',
+      'metaDescription',
+      'focusKeywords',
+    ] as const;
+    const before: Record<string, unknown> = {};
+    const after: Record<string, unknown> = {};
+    for (const key of trackedFields) {
+      const beforeVal = existing[key];
+      const afterVal = updated[key];
+      if (String(beforeVal) !== String(afterVal)) {
+        before[key] = beforeVal;
+        after[key] = afterVal;
+      }
+    }
+    // Origin lives inside the `specifications` JSON blob (not its own
+    // column — see CreateProductDto's comment), so it needs its own
+    // extraction rather than a plain existing[key]/updated[key] compare.
+    const originBefore = this.extractOrigin(existing.specifications);
+    const originAfter = this.extractOrigin(updated.specifications);
+    if (originBefore !== originAfter) {
+      before.origin = originBefore;
+      after.origin = originAfter;
+    }
+    if (Object.keys(after).length === 0) return;
+    await this.prisma.auditLog.create({
+      data: {
+        userId,
+        action: 'product.update',
+        entityType: 'Product',
+        entityId: updated.id,
+        before: before as Prisma.InputJsonValue,
+        after: after as Prisma.InputJsonValue,
+      },
+    });
+  }
+
+  private extractOrigin(specifications: Prisma.JsonValue): string | null {
+    if (!Array.isArray(specifications)) return null;
+    const entry = specifications.find(
+      (s): s is { key: string; value: string } =>
+        typeof s === 'object' &&
+        s !== null &&
+        'key' in s &&
+        typeof (s as { key: unknown }).key === 'string' &&
+        /^origin$/i.test((s as { key: string }).key),
+    );
+    return typeof entry?.value === 'string' ? entry.value : null;
   }
 
   // The master product is shared by every store, so deleting it is a
@@ -595,6 +727,19 @@ export class ProductsService {
           `Variant added: ${dto.sku}`,
         );
         await this.recomputeBasePriceFromVariants(tx, productId);
+        await tx.auditLog.create({
+          data: {
+            userId: user.sub,
+            action: 'variant.create',
+            entityType: 'Product',
+            entityId: productId,
+            after: {
+              sku: variant.sku,
+              unitLabel: variant.unitLabel,
+              basePrice: variant.basePrice.toString(),
+            },
+          },
+        });
         return variant;
       }),
     );
@@ -634,6 +779,27 @@ export class ProductsService {
         if (dto.basePrice !== undefined) {
           await this.recomputeBasePriceFromVariants(tx, productId);
         }
+        if (
+          dto.basePrice !== undefined &&
+          dto.basePrice !== Number(existing.basePrice)
+        ) {
+          await tx.auditLog.create({
+            data: {
+              userId: user.sub,
+              action: 'variant.price_change',
+              entityType: 'Product',
+              entityId: productId,
+              before: {
+                sku: existing.sku,
+                basePrice: existing.basePrice.toString(),
+              },
+              after: {
+                sku: existing.sku,
+                basePrice: updated.basePrice.toString(),
+              },
+            },
+          });
+        }
         return updated;
       }),
     );
@@ -666,10 +832,141 @@ export class ProductsService {
         `Variant removed: ${existing.sku}`,
       );
       await this.recomputeBasePriceFromVariants(tx, productId);
+      await tx.auditLog.create({
+        data: {
+          userId: user.sub,
+          action: 'variant.remove',
+          entityType: 'Product',
+          entityId: productId,
+          before: {
+            sku: existing.sku,
+            basePrice: existing.basePrice.toString(),
+          },
+        },
+      });
       return updated;
     });
     this.fileStorage.deleteUploadedFile(existing.imageUrl);
     return result;
+  }
+
+  // Product Details tab's Activity Log — merges this product's AuditLog
+  // trail (create/update/variant/publish events) with its StockMovement
+  // ledger into one human-readable timeline, newest first.
+  async getActivity(
+    productId: string,
+    user: JwtPayload,
+    page: number,
+    pageSize: number,
+  ) {
+    await this.requireActiveProduct(productId);
+    await this.assertVisibleById(user, productId);
+    const [logs, movements] = await Promise.all([
+      this.prisma.auditLog.findMany({
+        where: { entityType: 'Product', entityId: productId },
+        include: {
+          user: { select: { name: true, role: { select: { name: true } } } },
+        },
+      }),
+      this.prisma.stockMovement.findMany({
+        where: { productId },
+        include: {
+          createdBy: {
+            select: { name: true, role: { select: { name: true } } },
+          },
+        },
+      }),
+    ]);
+    const fromLogs = logs.map((log) => ({
+      id: `log-${log.id}`,
+      actorName: log.user?.name ?? 'System',
+      actorRole: log.user?.role?.name ?? null,
+      message: this.formatActivityMessage(log),
+      createdAt: log.createdAt,
+    }));
+    const fromMovements = movements.map((m) => ({
+      id: `move-${m.id}`,
+      actorName: m.createdBy?.name ?? 'System',
+      actorRole: m.createdBy?.role?.name ?? null,
+      message: `Stock ${m.quantity >= 0 ? 'added' : 'removed'} (${m.quantity >= 0 ? '+' : ''}${m.quantity})${m.note ? ` — ${m.note}` : ''}`,
+      createdAt: m.createdAt,
+    }));
+    const merged = [...fromLogs, ...fromMovements].sort(
+      (a, b) => b.createdAt.getTime() - a.createdAt.getTime(),
+    );
+    const total = merged.length;
+    const start = (page - 1) * pageSize;
+    return { items: merged.slice(start, start + pageSize), total };
+  }
+
+  private formatActivityMessage(log: {
+    action: string;
+    before: Prisma.JsonValue;
+    after: Prisma.JsonValue;
+  }): string {
+    const before = (log.before ?? {}) as Record<string, unknown>;
+    const after = (log.after ?? {}) as Record<string, unknown>;
+    switch (log.action) {
+      case 'product.create':
+        return after.isDraft ? 'Created as draft' : 'Created product';
+      case 'product.publish':
+        return `Published to ${after.channelName}`;
+      case 'product.unpublish':
+        return `Unpublished from ${after.channelName}`;
+      case 'variant.create':
+        return `Added variant ${after.sku}${after.unitLabel ? ` (${after.unitLabel})` : ''}`;
+      case 'variant.remove':
+        return `Removed variant ${before.sku}`;
+      case 'variant.price_change':
+        return `Variant price changed: ৳${before.basePrice} → ৳${after.basePrice} (${after.sku})`;
+      case 'product.update': {
+        const labels: Record<string, string> = {
+          sku: 'SKU',
+          name: 'Name',
+          slogan: 'Slogan',
+          shortDescription: 'Short Description',
+          description: 'Description',
+          slug: 'URL Slug',
+          forWho: 'For Who',
+          basePrice: 'Sell Price',
+          compareAtPrice: 'Regular Price',
+          costPrice: 'Cost Price',
+          unit: 'Unit',
+          importCountry: 'Import Country',
+          isActive: 'Active',
+          isDraft: 'Draft',
+          categoryId: 'Category',
+          brandId: 'Brand',
+          hasVariants: 'Variant mode',
+          variantOptionLabel: 'Variant Option Label',
+          thumbnailUrl: 'Thumbnail',
+          metaTitle: 'Meta Title',
+          metaDescription: 'Meta Description',
+          focusKeywords: 'Focus Keywords',
+          origin: 'Origin',
+        };
+        const priceKeys = new Set(['basePrice', 'compareAtPrice', 'costPrice']);
+        const display = (key: string, v: unknown) => {
+          if (v === null || v === undefined || v === '') return '—';
+          // Rich-text HTML — strip tags so the log doesn't dump raw markup.
+          let text =
+            key === 'description'
+              ? String(v)
+                  .replace(/<[^>]+>/g, ' ')
+                  .trim()
+              : String(v);
+          if (text.length > 50) text = `${text.slice(0, 50)}…`;
+          return `${priceKeys.has(key) ? '৳' : ''}${text || '—'}`;
+        };
+        const parts = Object.keys(after).map((key) => {
+          const label = labels[key] ?? key;
+          return `${label}: ${display(key, before[key])} → ${display(key, after[key])}`;
+        });
+        return `Updated ${parts.join(', ')}`;
+      }
+      default:
+        return log.action;
+    }
   }
 
   // One row per active channel, merged with this product's ProductChannel
@@ -795,9 +1092,28 @@ export class ProductsService {
   // "tick the checkbox, it just works" UX from the product spec. Admin can
   // fine-tune name/price afterward via upsertChannelOverride.
   async publish(user: JwtPayload, productId: string, channelId: string) {
-    return this.upsertChannelOverride(user, productId, channelId, {
-      isPublished: true,
+    const result = await this.upsertChannelOverride(
+      user,
+      productId,
+      channelId,
+      {
+        isPublished: true,
+      },
+    );
+    const channel = await this.prisma.channel.findUnique({
+      where: { id: channelId },
+      select: { name: true },
     });
+    await this.prisma.auditLog.create({
+      data: {
+        userId: user.sub,
+        action: 'product.publish',
+        entityType: 'Product',
+        entityId: productId,
+        after: { channelName: channel?.name ?? channelId },
+      },
+    });
+    return result;
   }
 
   async unpublish(user: JwtPayload, productId: string, channelId: string) {
@@ -810,10 +1126,24 @@ export class ProductsService {
         'This product has never been published to that channel',
       );
     }
-    return this.prisma.productChannel.update({
+    const result = await this.prisma.productChannel.update({
       where: { productId_channelId: { productId, channelId } },
       data: { isPublished: false },
     });
+    const channel = await this.prisma.channel.findUnique({
+      where: { id: channelId },
+      select: { name: true },
+    });
+    await this.prisma.auditLog.create({
+      data: {
+        userId: user.sub,
+        action: 'product.unpublish',
+        entityType: 'Product',
+        entityId: productId,
+        after: { channelName: channel?.name ?? channelId },
+      },
+    });
+    return result;
   }
 
   // Extra storefront categories (on top of Product.categoryId) — lets a

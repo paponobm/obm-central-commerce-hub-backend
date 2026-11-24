@@ -68,8 +68,8 @@ export class ProductsController {
   @Post()
   @UseGuards(CentralOnlyGuard)
   @RequirePermissions('products.manage')
-  create(@Body() dto: CreateProductDto) {
-    return this.productsService.create(dto);
+  create(@Body() dto: CreateProductDto, @CurrentUser() user: JwtPayload) {
+    return this.productsService.create(dto, user);
   }
 
   @Patch(':id')
@@ -137,6 +137,26 @@ export class ProductsController {
     @CurrentUser() user: JwtPayload,
   ) {
     return this.productsService.removeVariant(id, variantId, user);
+  }
+
+  // Product Details tab's Activity Log — every logged change to this
+  // product (create/update/variant/publish) plus its stock movements,
+  // merged into one timeline. Paginated since a long-lived product can
+  // accumulate a lot of entries.
+  @Get(':id/activity')
+  @RequirePermissions('products.view')
+  getActivity(
+    @Param('id') id: string,
+    @CurrentUser() user: JwtPayload,
+    @Query('page') page?: string,
+    @Query('pageSize') pageSize?: string,
+  ) {
+    return this.productsService.getActivity(
+      id,
+      user,
+      page ? Number(page) : 1,
+      pageSize ? Number(pageSize) : 20,
+    );
   }
 
   @Get(':id/channels')

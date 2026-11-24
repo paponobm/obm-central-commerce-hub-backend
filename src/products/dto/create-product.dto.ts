@@ -3,6 +3,8 @@ import {
   ArrayMaxSize,
   IsArray,
   IsBoolean,
+  IsDateString,
+  IsInt,
   IsNumber,
   IsOptional,
   IsString,
@@ -164,4 +166,24 @@ export class CreateProductDto {
   @IsString({ each: true })
   @MinLength(1, { each: true })
   focusKeywords?: string[];
+
+  // Stock & Delivery tab — all four live on the master Inventory row, not
+  // on Product itself (see ProductsService.create/update).
+  @IsOptional()
+  @IsDateString()
+  manufacturingDate?: string;
+
+  @IsOptional()
+  @IsDateString()
+  expiryDate?: string;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  expiryAlertDays?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  lowStockThreshold?: number;
 }
