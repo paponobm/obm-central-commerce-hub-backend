@@ -53,6 +53,21 @@ export class ReportsController {
     );
   }
 
+  // Dashboard-only, same permission override as getDashboard/getHourlyWebOrders.
+  @Get('channel-breakdown')
+  @RequirePermissions('dashboard.view')
+  getChannelBreakdown(
+    @CurrentUser() user: JwtPayload,
+    @Query('channelId') channelId?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    if (!channelId) {
+      throw new BadRequestException('channelId is required');
+    }
+    return this.reportsService.getChannelBreakdown(user, channelId, from, to);
+  }
+
   @Get('sales-by-channel')
   getSalesByChannel(
     @CurrentUser() user: JwtPayload,

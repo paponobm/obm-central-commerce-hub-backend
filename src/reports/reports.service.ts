@@ -342,6 +342,111 @@ export class ReportsService {
     };
   }
 
+  // One channel's Orders by Source / Orders by Status / employee-discount
+  // breakdown — the Dashboard's per-store report cards (one card trio per
+  // active channel), all three independently filterable by the same
+  // arbitrary date range. Source and employee-discount filter on when the
+  // order was *created*; Status instead filters on when the order most
+  // recently *entered its current status* (same idea as this file's own
+  // getStatusEnteredAt, just counted instead of per-order) — a status is
+  // an ongoing state, not a creation-time event, so "Today" here means
+  // "currently in this status, and got there today" (a week-old order
+  // marked Shipped just now counts), not "created today and happens to
+  // still be in this status". Employee attribution reuses
+  // getEmployeeReport's own rule exactly (manualDiscount summed by
+  // createdById, WEBSITE orders excluded since they were never "handled"
+  // by anyone — see that method's own comment) rather than inventing a
+  // different one here.
+  async getChannelBreakdown(
+    user: JwtPayload,
+    channelId: string,
+    from?: string,
+    to?: string,
+  ) {
+    const range = resolveDateRange(from, to);
+    const channelFilter = await this.channelScope.resolveDirectFilter(
+      user,
+      channelId,
+    );
+    const where: Prisma.OrderWhereInput = {
+      ...channelFilter,
+      createdAt: { gte: range.gte, lte: range.lte },
+    };
+
+    const [sourceGroups, latestStatusChanges, discountGroups] =
+      await Promise.all([
+        this.prisma.order.groupBy({
+          by: ['source'],
+          where,
+          _count: true,
+          _sum: { total: true },
+        }),
+        // The order's current status is always whichever row is latest —
+        // every order gets one at creation (see createOrder's own "Order
+        // created" row) and every later change appends another, never
+        // edits in place. Fetched unfiltered by date on purpose (see this
+        // method's own comment) and filtered in JS below instead, so an
+        // order that moved again after `range` doesn't get miscounted
+        // under a stale in-range row.
+        this.prisma.orderStatusHistory.findMany({
+          where: { order: channelFilter },
+          orderBy: { createdAt: 'desc' },
+          distinct: ['orderId'],
+          select: { toStatus: true, createdAt: true },
+        }),
+        this.prisma.order.groupBy({
+          by: ['createdById'],
+          where: {
+            ...where,
+            createdById: { not: null },
+            manualDiscount: { gt: 0 },
+          },
+          _count: true,
+          _sum: { manualDiscount: true },
+        }),
+      ]);
+
+    const statusCounts = Object.fromEntries(
+      ALL_STATUSES.map((s) => [s, 0]),
+    ) as Record<OrderStatus, number>;
+    for (const h of latestStatusChanges) {
+      if (h.createdAt >= range.gte && h.createdAt <= range.lte) {
+        statusCounts[h.toStatus] += 1;
+      }
+    }
+
+    const employeeIds = discountGroups
+      .map((g) => g.createdById)
+      .filter((id): id is string => !!id);
+    const employees = employeeIds.length
+      ? await this.prisma.user.findMany({
+          where: { id: { in: employeeIds } },
+          select: { id: true, name: true },
+        })
+      : [];
+    const employeeNameById = new Map(employees.map((e) => [e.id, e.name]));
+
+    return {
+      bySource: sourceGroups
+        .map((g) => ({
+          source: g.source,
+          orderCount: g._count,
+          salesTotal: toNumber(g._sum.total),
+        }))
+        .sort((a, b) => b.orderCount - a.orderCount),
+      byStatus: statusCounts,
+      employeeDiscount: discountGroups
+        .map((g) => ({
+          employeeId: g.createdById as string,
+          employeeName:
+            employeeNameById.get(g.createdById as string) ?? 'Unknown',
+          orderCount: g._count,
+          discountTotal: toNumber(g._sum.manualDiscount),
+        }))
+        .sort((a, b) => b.discountTotal - a.discountTotal),
+    };
+  }
+
   // Revenue by channel over an arbitrary date range (business-timezone
   // aware — see common/business-date.util.ts). Distinct from the
   // dashboard's ordersByChannel, which intentionally includes cancelled
@@ -965,7 +1070,10 @@ export class ReportsService {
           total: { count: 0, amount: 0 },
           totalDiscount: 0,
           byStatus: Object.fromEntries(
-            this.EMPLOYEE_REPORT_STATUSES.map((s) => [s, { count: 0, amount: 0 }]),
+            this.EMPLOYEE_REPORT_STATUSES.map((s) => [
+              s,
+              { count: 0, amount: 0 },
+            ]),
           ) as Record<OrderStatus, Metric>,
           bySource: Object.fromEntries(
             ALL_SOURCES.map((s) => [s, { count: 0, amount: 0 }]),
@@ -994,7 +1102,10 @@ export class ReportsService {
     }
     for (const g of sourceGroups) {
       const entry = getEntry(g.createdById as string);
-      entry.bySource[g.source] = { count: g._count, amount: toNumber(g._sum.total) };
+      entry.bySource[g.source] = {
+        count: g._count,
+        amount: toNumber(g._sum.total),
+      };
     }
 
     return {
