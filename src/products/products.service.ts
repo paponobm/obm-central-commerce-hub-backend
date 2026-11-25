@@ -814,6 +814,30 @@ export class ProductsService {
     });
   }
 
+  // A variant photo is also a real product photo — mirrors it into the
+  // product's own gallery (ProductImage) so it shows up there too, instead
+  // of being visible only inside that one variant's row. Dedupes on the
+  // URL itself, so re-saving a variant that already contributed its image
+  // never creates a second gallery row for the same file.
+  private async ensureImageInGallery(
+    tx: Prisma.TransactionClient,
+    productId: string,
+    url: string | null | undefined,
+  ) {
+    if (!url) return;
+    const exists = await tx.productImage.findFirst({
+      where: { productId, url },
+    });
+    if (exists) return;
+    const maxSort = await tx.productImage.aggregate({
+      where: { productId },
+      _max: { sortOrder: true },
+    });
+    await tx.productImage.create({
+      data: { productId, url, sortOrder: (maxSort._max.sortOrder ?? -1) + 1 },
+    });
+  }
+
   // Keeps "at most one default variant" true at the data layer — the admin
   // UI's radio button already enforces single-select, but a variant added
   // or edited with isDefault: true here always wins over whichever one
@@ -871,6 +895,7 @@ export class ProductsService {
           `Variant added: ${dto.sku}`,
         );
         await this.recomputeBasePriceFromVariants(tx, productId);
+        await this.ensureImageInGallery(tx, productId, dto.imageUrl);
         await tx.auditLog.create({
           data: {
             userId: user.sub,
@@ -922,6 +947,13 @@ export class ProductsService {
         }
         if (dto.basePrice !== undefined) {
           await this.recomputeBasePriceFromVariants(tx, productId);
+        }
+        // Unconditional on any truthy imageUrl (not just a change) —
+        // ensureImageInGallery is a no-op if it's already there, and this
+        // is also how a variant image set before this sync existed gets
+        // backfilled into the gallery the next time its row is saved.
+        if (dto.imageUrl) {
+          await this.ensureImageInGallery(tx, productId, dto.imageUrl);
         }
         if (
           dto.basePrice !== undefined &&

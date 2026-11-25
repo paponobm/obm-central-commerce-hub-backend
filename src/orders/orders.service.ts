@@ -137,6 +137,13 @@ function describeOrderLog(action: string, after: unknown): string {
         upsell?.discountPercent ? ` (${upsell.discountPercent}% off)` : ''
       }`;
     }
+    case 'order.suggested_item_added': {
+      const added = after as {
+        productName?: string;
+        quantity?: number;
+      } | null;
+      return `Added suggested product: ${added?.productName ?? 'a product'} (${added?.quantity ?? 1}x)`;
+    }
     default:
       return action;
   }
@@ -915,6 +922,7 @@ export class OrdersService {
               'order.invoice_printed',
               'order.created_from_lead',
               'order.checkout_upsell_item_added',
+              'order.suggested_item_added',
             ],
           },
         },
@@ -2105,16 +2113,37 @@ export class OrdersService {
       }
     }
 
-    // A productId already on the order keeps whatever isSuggested it had —
-    // including staying true once it's been flagged, across later edits.
-    // A productId never seen on this order before is a brand-new addition
-    // (e.g. an agent tempting a non-responsive customer with another
-    // product), so it starts out flagged suggested.
-    const existingSuggestedByProduct = new Map(
-      order.items.map((i) => [i.productId, i.isSuggested]),
-    );
+    // isSuggested lives per (product, variant) quantity, not per row, so an
+    // existing line can already be split across two DB rows — one kept from
+    // the original order, one from an earlier suggested add. Both are
+    // collapsed here into one total and one already-suggested total per key,
+    // which is what lets a later edit tell "more of what was already there"
+    // apart from "a genuinely new addition".
+    const lineKey = (productId: string, variantId: string | null) =>
+      `${productId}:${variantId ?? ''}`;
+    const existingTotalQtyByKey = new Map<string, number>();
+    const existingSuggestedQtyByKey = new Map<string, number>();
+    for (const i of order.items) {
+      const key = lineKey(i.productId, i.variantId);
+      existingTotalQtyByKey.set(key, (existingTotalQtyByKey.get(key) ?? 0) + i.quantity);
+      if (i.isSuggested) {
+        existingSuggestedQtyByKey.set(
+          key,
+          (existingSuggestedQtyByKey.get(key) ?? 0) + i.quantity,
+        );
+      }
+    }
+    // Filled in below, one entry per (product, variant) that picked up new
+    // suggested quantity in THIS edit — a brand-new line, or more units
+    // added to one that already existed — so the Activity log can report
+    // exactly what was added, not the line's full accumulated total.
+    const newlySuggestedAdditions: {
+      productName: string;
+      sku: string;
+      quantity: number;
+    }[] = [];
 
-    const lineItems = dto.items.map((item) => {
+    const lineItems = dto.items.flatMap((item) => {
       const product = productMap.get(item.productId)!;
       const variant = item.variantId ? variantMap.get(item.variantId) : null;
       const unitPrice =
@@ -2123,24 +2152,76 @@ export class OrdersService {
           ? toNumber(variant.basePrice)
           : (channelPrices.get(item.productId) ?? toNumber(product.basePrice)));
       const discount = item.discount ?? 0;
-      const total = item.quantity * unitPrice - discount;
-      if (total < 0) {
-        throw new BadRequestException(
-          `Discount exceeds line total for ${variant?.sku ?? product.sku}`,
-        );
+      const sku = variant?.sku ?? product.sku;
+
+      const key = lineKey(item.productId, variant?.id ?? null);
+      const prevTotal = existingTotalQtyByKey.get(key) ?? 0;
+      const prevSuggested = existingSuggestedQtyByKey.get(key) ?? 0;
+      const prevOriginal = prevTotal - prevSuggested;
+
+      // A brand-new line is entirely a suggested addition. Raising an
+      // existing line's quantity leaves its original portion untouched and
+      // adds the increase on top of whatever was already suggested — e.g.
+      // "customer ordered 2, agent added 1 more" becomes 2 original + 1
+      // suggested, not 3 suggested. Lowering it comes off the suggested
+      // portion first, only reaching into the original once that's used up.
+      let originalQty: number;
+      let suggestedQty: number;
+      if (prevTotal === 0) {
+        originalQty = 0;
+        suggestedQty = item.quantity;
+      } else if (item.quantity >= prevTotal) {
+        originalQty = prevOriginal;
+        suggestedQty = prevSuggested + (item.quantity - prevTotal);
+      } else {
+        const removed = prevTotal - item.quantity;
+        suggestedQty = Math.max(0, prevSuggested - removed);
+        originalQty = item.quantity - suggestedQty;
       }
-      return {
-        productId: product.id,
-        productName: product.name,
-        sku: variant?.sku ?? product.sku,
-        variantId: variant?.id ?? null,
-        variantLabel: variant?.unitLabel ?? null,
-        quantity: item.quantity,
-        unitPrice,
-        discount,
-        total,
-        isSuggested: existingSuggestedByProduct.get(item.productId) ?? true,
-      };
+
+      const addedSuggestedQty = suggestedQty - prevSuggested;
+      if (addedSuggestedQty > 0) {
+        newlySuggestedAdditions.push({
+          productName: product.name,
+          sku,
+          quantity: addedSuggestedQty,
+        });
+      }
+
+      const rows = [
+        { quantity: originalQty, isSuggested: false },
+        { quantity: suggestedQty, isSuggested: true },
+      ].filter((r) => r.quantity > 0);
+      // Only possible if item.quantity itself is 0, which validItems on the
+      // frontend already filters out before this ever arrives — kept as a
+      // fallback so a stray 0 still produces a sane single row instead of
+      // silently vanishing.
+      if (rows.length === 0) {
+        rows.push({ quantity: item.quantity, isSuggested: prevSuggested > 0 });
+      }
+
+      // The line's own (e.g. website checkout) discount belongs with the
+      // portion the customer actually drove — split isn't worth doing for
+      // a figure this is only ever the whole line's.
+      return rows.map((row) => {
+        const rowDiscount = rows.length === 1 || !row.isSuggested ? discount : 0;
+        const total = row.quantity * unitPrice - rowDiscount;
+        if (total < 0) {
+          throw new BadRequestException(`Discount exceeds line total for ${sku}`);
+        }
+        return {
+          productId: product.id,
+          productName: product.name,
+          sku,
+          variantId: variant?.id ?? null,
+          variantLabel: variant?.unitLabel ?? null,
+          quantity: row.quantity,
+          unitPrice,
+          discount: rowDiscount,
+          total,
+          isSuggested: row.isSuggested,
+        };
+      });
     });
 
     const subtotal = lineItems.reduce((sum, li) => sum + li.total, 0);
@@ -2201,6 +2282,22 @@ export class OrdersService {
             isSuggested: li.isSuggested,
           })),
         });
+
+        // One Activity log row per product/variant that picked up new
+        // suggested quantity in this edit (not the whole edit, and not the
+        // line's full accumulated total) — "who added what", same detail an
+        // agent upselling a non-responsive customer would want to see later.
+        for (const addition of newlySuggestedAdditions) {
+          await tx.auditLog.create({
+            data: {
+              userId: actorUserId,
+              action: 'order.suggested_item_added',
+              entityType: 'Order',
+              entityId: id,
+              after: addition,
+            },
+          });
+        }
 
         const updated = await tx.order.update({
           where: { id },
