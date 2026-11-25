@@ -1,8 +1,9 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { v2 as cloudinary } from 'cloudinary';
-import { unlink } from 'fs/promises';
-import { join } from 'path';
+import { randomBytes } from 'crypto';
+import { mkdir, readFile, unlink, writeFile } from 'fs/promises';
+import { extname, join } from 'path';
 
 // Deletes an uploaded image from wherever it actually lives — this
 // server's own /uploads/ directory, or Cloudinary — detected from the
@@ -42,5 +43,43 @@ export class FileStorageService {
     if (cloudinaryMatch) {
       cloudinary.uploader.destroy(cloudinaryMatch[1]).catch(() => undefined);
     }
+  }
+
+  // Makes an independent physical copy of an uploaded image and returns
+  // its new URL — used by ProductsService.duplicate() so the copy and the
+  // original each own their own file. Without this, two products would
+  // point at the exact same file, and deleting/replacing the image on
+  // either one (deleteUploadedFile above has no reference counting) would
+  // silently break the other's image too.
+  // An arbitrary external URL (neither /uploads/ nor Cloudinary) is
+  // returned unchanged — deleteUploadedFile already leaves those alone
+  // too, so there's no shared-file risk to begin with.
+  async duplicateUploadedFile(imageUrl: string): Promise<string> {
+    const localMatch = imageUrl.match(/\/uploads\/([^/?#]+)$/);
+    if (localMatch) {
+      const sourcePath = join(process.cwd(), 'uploads', localMatch[1]);
+      const buffer = await readFile(sourcePath);
+      const unique = `${Date.now()}-${randomBytes(6).toString('hex')}`;
+      const filename = `${unique}${extname(localMatch[1])}`;
+      await mkdir('./uploads', { recursive: true });
+      await writeFile(`./uploads/${filename}`, buffer);
+      const publicUrl =
+        this.config.get<string>('PUBLIC_URL') ?? 'http://localhost:3000';
+      return `${publicUrl}/uploads/${filename}`;
+    }
+
+    const cloudinaryMatch = imageUrl.match(
+      /res\.cloudinary\.com\/.+\/upload\/(?:v\d+\/)?(.+)\.[a-zA-Z0-9]+(?:[?#].*)?$/,
+    );
+    if (cloudinaryMatch) {
+      const folder = this.config.get<string>('CLOUDINARY_FOLDER');
+      const result = await cloudinary.uploader.upload(imageUrl, {
+        folder,
+        resource_type: 'image',
+      });
+      return result.secure_url;
+    }
+
+    return imageUrl;
   }
 }

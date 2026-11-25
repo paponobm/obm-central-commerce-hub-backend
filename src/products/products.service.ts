@@ -4,6 +4,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { randomBytes } from 'crypto';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { runTransaction } from '../common/prisma-transaction.util';
@@ -270,6 +271,149 @@ export class ProductsService {
         }
 
         return product;
+      }),
+    );
+  }
+
+  // "Duplicate" button on the New/Edit Product page's Stock & Delivery+
+  // header cluster — copies everything about a product (master fields,
+  // variants, images, extra categories, Stock & Delivery settings) into a
+  // brand-new DRAFT product, except its stock (starts at 0 — a duplicate
+  // hasn't actually been received) and its channel publishing (stays
+  // unpublished everywhere, so it never silently goes live). Images are
+  // physically copied (FileStorageService.duplicateUploadedFile), not just
+  // re-pointed at the same URL — the original's own cleanup on a later
+  // delete/replace has no reference counting, so sharing a URL would let
+  // editing either product's image quietly break the other's.
+  async duplicate(productId: string, user: JwtPayload) {
+    const source = await this.requireActiveProduct(productId);
+    await this.assertVisibleById(user, productId);
+    const [variants, images, extraCategories, sourceInventory] =
+      await Promise.all([
+        this.prisma.productVariant.findMany({
+          where: { productId, deletedAt: null },
+          orderBy: { sortOrder: 'asc' },
+        }),
+        this.prisma.productImage.findMany({
+          where: { productId },
+          orderBy: { sortOrder: 'asc' },
+        }),
+        this.prisma.productCategory.findMany({ where: { productId } }),
+        this.prisma.inventory.findUnique({ where: { productId } }),
+      ]);
+
+    const suffix = randomBytes(3).toString('hex').toUpperCase();
+    const newSku = `${source.sku}-COPY-${suffix}`;
+
+    const [newThumbnailUrl, newImageUrls, newVariantImageUrls] =
+      await Promise.all([
+        source.thumbnailUrl
+          ? this.fileStorage.duplicateUploadedFile(source.thumbnailUrl)
+          : Promise.resolve(null),
+        Promise.all(
+          images.map((img) => this.fileStorage.duplicateUploadedFile(img.url)),
+        ),
+        Promise.all(
+          variants.map((v) =>
+            v.imageUrl
+              ? this.fileStorage.duplicateUploadedFile(v.imageUrl)
+              : Promise.resolve(null),
+          ),
+        ),
+      ]);
+
+    return this.handleUniqueConstraints(() =>
+      this.prisma.$transaction(async (tx) => {
+        const duplicated = await tx.product.create({
+          data: {
+            sku: newSku,
+            name: `${source.name} (duplicate)`,
+            slogan: source.slogan,
+            shortDescription: source.shortDescription,
+            description: source.description,
+            specifications: (source.specifications ??
+              undefined) as Prisma.InputJsonValue,
+            forWho: source.forWho,
+            costPrice: source.costPrice,
+            basePrice: source.basePrice,
+            compareAtPrice: source.compareAtPrice,
+            unit: source.unit,
+            importCountry: source.importCountry,
+            categoryId: source.categoryId,
+            brandId: source.brandId,
+            hasVariants: source.hasVariants,
+            variantOptionLabel: source.variantOptionLabel,
+            thumbnailUrl: newThumbnailUrl,
+            // Always a fresh, unpublished draft — regardless of whether
+            // the source was already live.
+            isActive: false,
+            isDraft: true,
+            metaTitle: source.metaTitle,
+            metaDescription: source.metaDescription,
+            focusKeywords: source.focusKeywords,
+          },
+        });
+
+        await tx.inventory.create({
+          data: {
+            productId: duplicated.id,
+            currentStock: 0,
+            reservedStock: 0,
+            lowStockThreshold: sourceInventory?.lowStockThreshold ?? 10,
+            manufacturingDate: sourceInventory?.manufacturingDate ?? null,
+            expiryDate: sourceInventory?.expiryDate ?? null,
+            expiryAlertDays: sourceInventory?.expiryAlertDays ?? null,
+          },
+        });
+
+        if (variants.length) {
+          await tx.productVariant.createMany({
+            data: variants.map((v, i) => ({
+              productId: duplicated.id,
+              sku: `${v.sku}-COPY-${suffix}`,
+              unitLabel: v.unitLabel,
+              basePrice: v.basePrice,
+              compareAtPrice: v.compareAtPrice,
+              stock: 0,
+              imageUrl: newVariantImageUrls[i],
+              isDefault: v.isDefault,
+              isActive: v.isActive,
+              sortOrder: v.sortOrder,
+            })),
+          });
+        }
+
+        if (images.length) {
+          await tx.productImage.createMany({
+            data: images.map((img, i) => ({
+              productId: duplicated.id,
+              url: newImageUrls[i],
+              sortOrder: img.sortOrder,
+            })),
+          });
+        }
+
+        if (extraCategories.length) {
+          await tx.productCategory.createMany({
+            data: extraCategories.map((c) => ({
+              productId: duplicated.id,
+              categoryId: c.categoryId,
+            })),
+          });
+        }
+
+        await tx.auditLog.create({
+          data: {
+            userId: user.sub,
+            action: 'product.duplicate',
+            entityType: 'Product',
+            entityId: duplicated.id,
+            before: { sourceProductId: productId, sourceSku: source.sku },
+            after: { name: duplicated.name, sku: duplicated.sku },
+          },
+        });
+
+        return duplicated;
       }),
     );
   }
@@ -909,6 +1053,8 @@ export class ProductsService {
     switch (log.action) {
       case 'product.create':
         return after.isDraft ? 'Created as draft' : 'Created product';
+      case 'product.duplicate':
+        return `Duplicated from ${before.sourceSku}`;
       case 'product.publish':
         return `Published to ${after.channelName}`;
       case 'product.unpublish':

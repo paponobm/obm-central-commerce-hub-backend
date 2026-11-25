@@ -88,6 +88,13 @@ export class ProductsController {
     return this.productsService.remove(id, user);
   }
 
+  @Post(':id/duplicate')
+  @UseGuards(CentralOnlyGuard)
+  @RequirePermissions('products.manage')
+  duplicate(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
+    return this.productsService.duplicate(id, user);
+  }
+
   @Post(':id/images')
   @RequirePermissions('products.manage')
   addImage(
