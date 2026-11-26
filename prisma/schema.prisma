@@ -475,6 +475,16 @@ model Product {
   metaTitle          String?
   metaDescription    String?
   focusKeywords      String[] @default([])
+  // The admin Products list's own manual ordering (the "#" column) —
+  // completely separate from ProductChannel.sortOrder, which is the
+  // per-channel storefront display order. Higher sorts first. Every
+  // existing row starts at the same default (0), so adding this column
+  // changes nothing until the first manual reorder — see
+  // ProductsService.reorder, which is also what gives this real,
+  // contiguous values the first time it runs. A freshly created product
+  // gets (current max + 1), landing at the top, same as today's
+  // createdAt-based default ordering.
+  sortOrder          Int       @default(0)
   deletedAt          DateTime?
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt
@@ -496,6 +506,7 @@ model Product {
   @@index([categoryId])
   @@index([brandId])
   @@index([slug])
+  @@index([sortOrder])
   @@map("products")
 }
 

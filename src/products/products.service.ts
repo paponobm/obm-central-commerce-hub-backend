@@ -171,6 +171,11 @@ export class ProductsService {
       // reserve/deduct against later.
       this.prisma.$transaction(async (tx) => {
         const { defaultLowStockThreshold } = await this.settings.get();
+        // Lands at the top of the admin Products list's manual order —
+        // same "newest first" spot createdAt-based ordering already put it
+        // in before sortOrder existed (see the Product.sortOrder comment).
+        const { _max } = await tx.product.aggregate({ _max: { sortOrder: true } });
+        createData.sortOrder = (_max.sortOrder ?? 0) + 1;
         const product = await tx.product.create({ data: createData });
         await tx.auditLog.create({
           data: {
@@ -324,8 +329,11 @@ export class ProductsService {
 
     return this.handleUniqueConstraints(() =>
       this.prisma.$transaction(async (tx) => {
+        // Same "lands at the top" rule as a brand-new product (see create()).
+        const { _max } = await tx.product.aggregate({ _max: { sortOrder: true } });
         const duplicated = await tx.product.create({
           data: {
+            sortOrder: (_max.sortOrder ?? 0) + 1,
             sku: newSku,
             name: `${source.name} (duplicate)`,
             slogan: source.slogan,
@@ -465,8 +473,51 @@ export class ProductsService {
         // variable product.
         variants: { where: { deletedAt: null } },
       },
-      orderBy: { createdAt: 'desc' },
+      orderBy: [{ sortOrder: 'desc' }, { createdAt: 'desc' }],
     });
+  }
+
+  // Moves one product to a new 1-indexed position among active products
+  // only — the "#" column is only ever editable with the Products list's
+  // Status filter set to Active and no search/category filter (see the
+  // frontend), so the position math here has to be scoped to exactly that
+  // same set, or a typed position wouldn't line up with what's on screen.
+  // Shifts everything between the old and new spot accordingly. Reassigns
+  // sortOrder across the WHOLE active set rather than just the affected
+  // range — simplest way to keep values dense and collision-free, and cheap
+  // enough at any catalog size this admin UI is meant for.
+  async reorder(productId: string, position: number, user: JwtPayload) {
+    const channelWhere = await this.channelWhereFilter(user, undefined);
+    const products = await this.prisma.product.findMany({
+      where: { deletedAt: null, isActive: true, ...channelWhere },
+      select: { id: true },
+      orderBy: [{ sortOrder: 'desc' }, { createdAt: 'desc' }],
+    });
+    const ids = products.map((p) => p.id);
+    const fromIndex = ids.indexOf(productId);
+    if (fromIndex === -1) {
+      throw new NotFoundException(`Product ${productId} not found`);
+    }
+    const toIndex = Math.min(Math.max(position - 1, 0), ids.length - 1);
+    if (toIndex === fromIndex) return { success: true };
+    ids.splice(fromIndex, 1);
+    ids.splice(toIndex, 0, productId);
+
+    // One statement, not one UPDATE per product — a few hundred sequential
+    // round trips to the (remote, pooled) database here was slow enough to
+    // blow past the interactive transaction's own time budget. Highest
+    // sortOrder = top of the list, so the first id in the new order gets
+    // the largest value, counting down to 1 for the last.
+    const rows = Prisma.join(
+      ids.map((id, i) => Prisma.sql`(${id}::text, ${ids.length - i}::int)`),
+    );
+    await this.prisma.$executeRaw`
+      UPDATE products AS p
+      SET "sortOrder" = v.sort_order
+      FROM (VALUES ${rows}) AS v(id, sort_order)
+      WHERE p.id = v.id
+    `;
+    return { success: true };
   }
 
   // The New/Edit Product form's "For Who" checkbox list — not a fixed enum,

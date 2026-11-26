@@ -24,6 +24,7 @@ import { UpsertProductChannelDto } from './dto/upsert-product-channel.dto';
 import { SetProductCategoriesDto } from './dto/set-product-categories.dto';
 import { CreateProductVariantDto } from './dto/create-product-variant.dto';
 import { UpdateProductVariantDto } from './dto/update-product-variant.dto';
+import { ReorderProductDto } from './dto/reorder-product.dto';
 
 @Controller('admin/products')
 @UseGuards(JwtAuthGuard, PermissionsGuard)
@@ -80,6 +81,18 @@ export class ProductsController {
     @CurrentUser() user: JwtPayload,
   ) {
     return this.productsService.update(id, dto, user);
+  }
+
+  // Products list's manual "#" reordering — only ever called from the
+  // page's unfiltered, default view (see the frontend).
+  @Patch(':id/reorder')
+  @RequirePermissions('products.manage')
+  reorder(
+    @Param('id') id: string,
+    @Body() dto: ReorderProductDto,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.productsService.reorder(id, dto.position, user);
   }
 
   @Delete(':id')
