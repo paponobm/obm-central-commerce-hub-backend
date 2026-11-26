@@ -23,6 +23,8 @@ export const PERMISSIONS: { key: string; label: string }[] = [
   { key: 'orders.update_status', label: 'Change order status' },
   { key: 'customers.view', label: 'View customers' },
   { key: 'customers.manage', label: 'Create/edit customers' },
+  { key: 'counseling.view', label: 'View counseling (call-back) requests' },
+  { key: 'counseling.manage', label: 'Resolve counseling requests' },
   { key: 'payments.view', label: 'View payments' },
   { key: 'payments.manage', label: 'Record payments' },
   { key: 'shipments.view', label: 'View shipments' },

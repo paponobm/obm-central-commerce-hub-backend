@@ -25,6 +25,7 @@ import { SettingsModule } from './settings/settings.module';
 import { IntegrationsModule } from './integrations/integrations.module';
 import { OrderLocksModule } from './order-locks/order-locks.module';
 import { BdCourierModule } from './bd-courier/bd-courier.module';
+import { CallRequestsModule } from './call-requests/call-requests.module';
 
 @Module({
   imports: [
@@ -55,6 +56,7 @@ import { BdCourierModule } from './bd-courier/bd-courier.module';
     IntegrationsModule,
     OrderLocksModule,
     BdCourierModule,
+    CallRequestsModule,
   ],
   controllers: [AppController],
   providers: [AppService, { provide: APP_GUARD, useClass: ThrottlerGuard }],

@@ -15,6 +15,8 @@ import { StorefrontService } from './storefront.service';
 import { StorefrontCreateOrderDto } from './dto/storefront-create-order.dto';
 import { StorefrontCheckoutLeadDto } from './dto/storefront-checkout-lead.dto';
 import { StorefrontAddUpsellItemDto } from './dto/storefront-add-upsell-item.dto';
+import { CallRequestsService } from '../call-requests/call-requests.service';
+import { CreateCallRequestDto } from '../call-requests/dto/create-call-request.dto';
 
 // No JwtAuthGuard here — deliberately public. ChannelResolverGuard is the
 // only guard, and it's what keeps this whole surface channel-isolated
@@ -22,7 +24,10 @@ import { StorefrontAddUpsellItemDto } from './dto/storefront-add-upsell-item.dto
 @Controller('store/:channelSlug')
 @UseGuards(ChannelResolverGuard)
 export class StorefrontController {
-  constructor(private readonly storefrontService: StorefrontService) {}
+  constructor(
+    private readonly storefrontService: StorefrontService,
+    private readonly callRequestsService: CallRequestsService,
+  ) {}
 
   @Get()
   getConfig(@CurrentChannel() channel: Channel) {
@@ -144,5 +149,18 @@ export class StorefrontController {
     @Body() dto: StorefrontCheckoutLeadDto,
   ) {
     return this.storefrontService.saveCheckoutLead(channel, dto);
+  }
+
+  // "ফ্রি কল-পরামর্শ নিন" — reviewed centrally in the admin's Counseling
+  // page, not per-store (see CallRequest's schema comment), but still
+  // recorded through the channel-scoped storefront surface like every
+  // other public mutation here.
+  @Throttle({ default: { limit: 10, ttl: 60000 } })
+  @Post('call-requests')
+  createCallRequest(
+    @CurrentChannel() channel: Channel,
+    @Body() dto: CreateCallRequestDto,
+  ) {
+    return this.callRequestsService.create(channel, dto);
   }
 }

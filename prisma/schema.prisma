@@ -267,8 +267,40 @@ model Channel {
   checkoutLeads   CheckoutLead[]
   integrations    Integration[]
   vipCoupons      VipCoupon[]
+  callRequests    CallRequest[]
 
   @@map("channels")
+}
+
+enum CallRequestStatus {
+  PENDING
+  SOLVED
+}
+
+// A storefront's "ফ্রি কল-পরামর্শ নিন" (free call consultation) lead — a
+// visitor describes their problem and asks to be called back, instead of
+// browsing/ordering themselves. Reviewed centrally in the admin's own
+// "Counseling" page (not per-store, unlike almost everything else here) —
+// channelId is kept purely as a reference for which storefront it came
+// from, never used to restrict who can see or resolve it.
+model CallRequest {
+  id          String            @id @default(cuid())
+  // Shown to the customer on the confirmation screen so they have something
+  // to reference if they call back themselves — globally unique, generated
+  // server-side, never admin-typed (same precedent as VipCoupon.code).
+  requestCode String            @unique
+  name        String
+  phone       String
+  problem     String
+  status      CallRequestStatus @default(PENDING)
+  channelId   String?
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  channel Channel? @relation(fields: [channelId], references: [id])
+
+  @@index([status])
+  @@map("call_requests")
 }
 
 // A real, single-use coupon the backend generates automatically the moment
