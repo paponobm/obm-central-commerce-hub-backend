@@ -440,7 +440,16 @@ export class StorefrontService {
         // Join loading: the product, images, category, brand and stock come back
         // in one round trip instead of one query per relation.
         relationLoadStrategy: 'join',
-        orderBy: [{ sortOrder: 'asc' }, { createdAt: 'desc' }],
+        // The admin Products list's own manual order (Product.sortOrder,
+        // higher = earlier) now drives storefront display order directly —
+        // ProductChannel.sortOrder is never actually set from any admin
+        // screen today, so it stayed as a tiebreak rather than the primary
+        // key here.
+        orderBy: [
+          { product: { sortOrder: 'desc' } },
+          { sortOrder: 'asc' },
+          { createdAt: 'desc' },
+        ],
         skip: (page - 1) * limit,
         take: limit,
       }),
