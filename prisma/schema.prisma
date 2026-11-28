@@ -268,8 +268,49 @@ model Channel {
   integrations    Integration[]
   vipCoupons      VipCoupon[]
   callRequests    CallRequest[]
+  analyticsEvents AnalyticsEvent[]
 
   @@map("channels")
+}
+
+enum AnalyticsEventType {
+  PAGE_VIEW
+  PRODUCT_VIEW
+  SEARCH
+  ADD_TO_CART
+}
+
+// Deliberately simple, in-house event log — not an attempt at rebuilding
+// Google Analytics. Enough to answer "how many views did this page/product
+// get", "what are people searching for", and "did this traffic come from a
+// link we tagged" (via utm*), without trying to solve bot filtering or
+// multi-touch attribution ourselves. One row per event; the admin's own
+// Analytics page and each product's Performance card both read straight
+// from this table (see AnalyticsService) rather than a separate rollup —
+// fine at this traffic volume, revisit only if it isn't.
+model AnalyticsEvent {
+  id          String             @id @default(cuid())
+  channelId   String
+  type        AnalyticsEventType
+  path        String
+  productId   String?
+  searchQuery String?
+  // Anonymous, client-generated (localStorage) — lets "unique visitors" be
+  // counted as distinct sessionIds, not just raw event rows. Never tied to
+  // a real Customer record.
+  sessionId   String
+  referrer    String?
+  utmSource   String?
+  utmMedium   String?
+  utmCampaign String?
+  createdAt   DateTime           @default(now())
+
+  channel Channel  @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  product Product? @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([channelId, type, createdAt])
+  @@index([productId])
+  @@map("analytics_events")
 }
 
 enum CallRequestStatus {
@@ -534,6 +575,7 @@ model Product {
   // above — lets a product show up on more than one category page.
   categories     ProductCategory[]
   variants       ProductVariant[]
+  analyticsEvents AnalyticsEvent[]
 
   @@index([categoryId])
   @@index([brandId])

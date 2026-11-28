@@ -25,11 +25,15 @@ import { SetProductCategoriesDto } from './dto/set-product-categories.dto';
 import { CreateProductVariantDto } from './dto/create-product-variant.dto';
 import { UpdateProductVariantDto } from './dto/update-product-variant.dto';
 import { ReorderProductDto } from './dto/reorder-product.dto';
+import { AnalyticsService } from '../analytics/analytics.service';
 
 @Controller('admin/products')
 @UseGuards(JwtAuthGuard, PermissionsGuard)
 export class ProductsController {
-  constructor(private readonly productsService: ProductsService) {}
+  constructor(
+    private readonly productsService: ProductsService,
+    private readonly analyticsService: AnalyticsService,
+  ) {}
 
   @Get()
   @RequirePermissions('products.view')
@@ -177,6 +181,19 @@ export class ProductsController {
       page ? Number(page) : 1,
       pageSize ? Number(pageSize) : 20,
     );
+  }
+
+  // Product Details tab's Performance card — this product's own page-view
+  // count over time (see AnalyticsEvent). Gated on analytics.view, not
+  // products.view, same separate-permission precedent as Counseling.
+  @Get(':id/analytics')
+  @RequirePermissions('analytics.view')
+  getProductAnalytics(
+    @Param('id') id: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    return this.analyticsService.getProductAnalytics(id, { from, to });
   }
 
   @Get(':id/channels')

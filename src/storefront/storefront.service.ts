@@ -547,8 +547,9 @@ export class StorefrontService {
     }
     return {
       ...this.toPublicProduct(pc),
-      seoTitle: pc.seoTitle,
-      seoDescription: pc.seoDescription,
+      seoTitle: pc.seoTitle || pc.product.metaTitle || null,
+      seoDescription: pc.seoDescription || pc.product.metaDescription || null,
+      focusKeywords: pc.product.focusKeywords || null,
     };
   }
 

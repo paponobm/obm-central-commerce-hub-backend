@@ -17,6 +17,8 @@ import { StorefrontCheckoutLeadDto } from './dto/storefront-checkout-lead.dto';
 import { StorefrontAddUpsellItemDto } from './dto/storefront-add-upsell-item.dto';
 import { CallRequestsService } from '../call-requests/call-requests.service';
 import { CreateCallRequestDto } from '../call-requests/dto/create-call-request.dto';
+import { AnalyticsService } from '../analytics/analytics.service';
+import { TrackEventDto } from '../analytics/dto/track-event.dto';
 
 // No JwtAuthGuard here — deliberately public. ChannelResolverGuard is the
 // only guard, and it's what keeps this whole surface channel-isolated
@@ -27,6 +29,7 @@ export class StorefrontController {
   constructor(
     private readonly storefrontService: StorefrontService,
     private readonly callRequestsService: CallRequestsService,
+    private readonly analyticsService: AnalyticsService,
   ) {}
 
   @Get()
@@ -162,5 +165,15 @@ export class StorefrontController {
     @Body() dto: CreateCallRequestDto,
   ) {
     return this.callRequestsService.create(channel, dto);
+  }
+
+  // Page views/product views/searches/add-to-cart — fired far more often
+  // than any other public endpoint here (every navigation, not just a form
+  // submit), so this gets a much looser limit than the rest of this
+  // controller rather than the 10/min default suited to actual form posts.
+  @Throttle({ default: { limit: 120, ttl: 60000 } })
+  @Post('track')
+  track(@CurrentChannel() channel: Channel, @Body() dto: TrackEventDto) {
+    return this.analyticsService.record(channel, dto);
   }
 }
